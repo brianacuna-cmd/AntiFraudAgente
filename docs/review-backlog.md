@@ -31,7 +31,15 @@ deliberate design pass (this document).
 
 ## OPEN — requires a design pass (do NOT patch reflexively)
 
-### B1 — Consumer offset handling breaks at-least-once (REGRESSION from fix #4)
+### B1 — Consumer offset handling — ✅ DONE
+
+Implemented (194 tests green). The poll loop now seeks back to the failed
+offset and retries with bounded backoff (per `(topic, partition, offset)`
+attempt tracking); on exhausting `kafka_max_delivery_attempts` it takes
+`kafka_on_exhausted` = `crash` (default) or `skip`. `dead_letter` remains
+future work (needs a producer + DLQ topic). Original finding kept below.
+
+#### (original) Consumer offset handling breaks at-least-once (REGRESSION from fix #4)
 `consumer.py` `run()` currently logs-and-`continue`s past a per-message
 exception. Because `confluent_kafka.commit()` advances the per-partition
 offset, a later successful message commits an offset **above** the failed one,
