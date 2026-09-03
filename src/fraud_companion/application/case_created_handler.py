@@ -61,32 +61,33 @@ def _tool_name(message: Any) -> Any:
     return name
 
 
-def _tool_call_names(message: Any) -> list[Any]:
-    calls = getattr(message, "tool_calls", None)
-    if calls is None and isinstance(message, dict):
-        calls = message.get("tool_calls")
-    names = []
-    for call in calls or []:
-        names.append(call.get("name") if isinstance(call, dict) else getattr(call, "name", None))
-    return names
+def _tool_status(message: Any) -> Any:
+    status = getattr(message, "status", None)
+    if status is None and isinstance(message, dict):
+        status = message.get("status")
+    return status
 
 
 def _brief_was_written(result: Any) -> bool:
-    """Scan the agent's returned messages for proof that put_agent_brief ran.
+    """Scan the agent's returned messages for proof that put_agent_brief ran
+    *successfully*.
 
     Accepts both a LangGraph result dict (``{"messages": [...]}``) and any
     object exposing ``.messages``. Evidence is a ToolMessage carrying the
-    tool ``name`` or an AIMessage ``tool_calls`` entry for the write tool.
+    write tool's ``name`` whose status is not ``"error"`` — a tool call that
+    the agent requested but that came back with an error status is NOT a
+    successful write and does not count.
     """
     if isinstance(result, dict):
         messages = result.get("messages") or []
     else:
         messages = getattr(result, "messages", []) or []
     for message in messages:
-        if _tool_name(message) == _PUT_AGENT_BRIEF_TOOL:
-            return True
-        if _PUT_AGENT_BRIEF_TOOL in _tool_call_names(message):
-            return True
+        if _tool_name(message) != _PUT_AGENT_BRIEF_TOOL:
+            continue
+        if _tool_status(message) == "error":
+            continue
+        return True
     return False
 
 
@@ -130,6 +131,17 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
     Returns a :class:`HandleResult` describing the outcome so the future
     Kafka consumer can decide whether to commit the offset.
     """
+    if not isinstance(event, dict):
+        # Valid JSON that parsed to a non-object (array/string/number/null).
+        # Do NOT let event.get(...) raise AttributeError past the consumer:
+        # that crashes the poll loop and redelivers forever. Commit-safe skip.
+        logger.warning(
+            "case.created envelope is not a JSON object (%s); skipping to "
+            "avoid infinite redelivery.",
+            type(event).__name__,
+        )
+        return HandleResult.SKIPPED_MALFORMED
+
     event_type = event.get("eventType")
     if event_type != CASE_CREATED_EVENT:
         logger.info("Ignoring event of type %r (not %r)", event_type, CASE_CREATED_EVENT)

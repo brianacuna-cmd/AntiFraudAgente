@@ -27,10 +27,11 @@ CASE_ID = "507f1f77bcf86cd799439011"
 
 
 class _ToolMessage:
-    """Minimal stand-in for a LangChain ToolMessage (carries a tool ``name``)."""
+    """Minimal stand-in for a LangChain ToolMessage (name + status)."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, status: str = "success") -> None:
         self.name = name
+        self.status = status
 
 
 def _envelope(event_type: str = CASE_CREATED_EVENT, assigned_to: object = None) -> dict:
@@ -152,6 +153,33 @@ def test_handle_case_created_skips_malformed_payload_without_raising(bad_payload
 
     assert result is HandleResult.SKIPPED_MALFORMED
     assert agent.invocations == []
+
+
+@pytest.mark.parametrize("bad_envelope", [[], "not-a-dict", 5, None, 3.14])
+def test_handle_case_created_skips_non_dict_envelope(bad_envelope) -> None:
+    # A case.created-headered message whose JSON body parses to a non-object
+    # must not raise AttributeError (that would crash the consumer poll loop
+    # and redeliver forever). It is a committable malformed outcome.
+    agent = _FakeAgent()
+
+    result = handle_case_created(bad_envelope, agent)
+
+    assert result is HandleResult.SKIPPED_MALFORMED
+    assert agent.invocations == []
+
+
+def test_handle_case_created_raises_when_brief_tool_errored() -> None:
+    # put_agent_brief ran but its ToolMessage came back with an error status
+    # (e.g. the tool body raised and LangGraph surfaced it as an error-status
+    # ToolMessage still carrying the tool name). This is NOT a successful write
+    # and must force redelivery, not a false PROCESSED.
+    class _ErrAgent(_FakeAgent):
+        def invoke(self, input_: dict) -> dict:
+            self.invocations.append(input_)
+            return {"messages": [_ToolMessage("put_agent_brief", status="error")]}
+
+    with pytest.raises(BriefNotWrittenError):
+        handle_case_created(_envelope(), _ErrAgent())
 
 
 def test_handle_case_created_raises_when_brief_not_written() -> None:
