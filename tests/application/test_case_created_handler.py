@@ -112,6 +112,31 @@ def test_handle_case_created_reraises_retryable_errors(error) -> None:
         handle_case_created(_envelope(), agent)
 
 
+@pytest.mark.parametrize(
+    "bad_payload",
+    [
+        {},  # missing caseId
+        {"caseId": ""},  # empty caseId
+        {"caseId": None},  # null caseId
+        "not-a-dict",  # payload is not an object
+        None,  # payload absent
+        123,  # payload wrong type
+    ],
+)
+def test_handle_case_created_skips_malformed_payload_without_raising(bad_payload) -> None:
+    # A valid-JSON envelope whose payload has no usable caseId must NOT raise
+    # (raising would propagate past the consumer, block the offset commit, and
+    # make Kafka redeliver this poison message forever). It must be reported as
+    # a committable, non-retryable outcome.
+    agent = _FakeAgent()
+    envelope = {"eventType": CASE_CREATED_EVENT, "payload": bad_payload}
+
+    result = handle_case_created(envelope, agent)
+
+    assert result is HandleResult.SKIPPED_MALFORMED
+    assert agent.invocations == []
+
+
 def test_handle_case_created_accepts_string_or_null_assigned_to() -> None:
     agent = _FakeAgent()
 

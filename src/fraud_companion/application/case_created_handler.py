@@ -50,10 +50,17 @@ class HandleResult(Enum):
     #: The agent run hit a terminal, non-retryable error (case not found or
     #: already closed). Safe to commit the offset; will never succeed later.
     SKIPPED_TERMINAL = auto()
+    #: The envelope was valid JSON but its payload has no usable caseId (or is
+    #: not an object). This is a deterministic poison message that can never
+    #: succeed, so it is safe (and required) to commit the offset rather than
+    #: let it redeliver forever.
+    SKIPPED_MALFORMED = auto()
 
 
 def _extract_case_id(event: dict[str, Any]) -> str:
-    payload = event.get("payload") or {}
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("case.created event payload is missing or not an object")
     case_id = payload.get("caseId")
     if not case_id:
         raise ValueError("case.created event payload is missing caseId")
@@ -78,7 +85,19 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
         logger.info("Ignoring event of type %r (not %r)", event_type, CASE_CREATED_EVENT)
         return HandleResult.SKIPPED_IGNORED
 
-    case_id = _extract_case_id(event)
+    try:
+        case_id = _extract_case_id(event)
+    except ValueError as exc:
+        # Deterministic poison message: valid JSON, unusable payload. Do NOT
+        # raise (that would propagate past the consumer, skip the offset
+        # commit, and make Kafka redeliver this message forever). Report it as
+        # a committable, non-retryable outcome instead.
+        logger.warning(
+            "Malformed case.created envelope; skipping to avoid infinite "
+            "redelivery: %s",
+            exc,
+        )
+        return HandleResult.SKIPPED_MALFORMED
 
     try:
         agent.invoke(
