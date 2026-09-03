@@ -39,6 +39,56 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_ERROR_TYPES = (CaseNotFoundError, CaseClosedError)
 
+#: Name of the sole write tool; a completed run must show evidence it ran.
+_PUT_AGENT_BRIEF_TOOL = "put_agent_brief"
+
+
+class BriefNotWrittenError(RuntimeError):
+    """Raised when an agent run completed without error but produced no
+    evidence that ``put_agent_brief`` was invoked.
+
+    This is treated as retryable: reporting success would commit the Kafka
+    offset and silently drop the case with no brief ever written. Raising
+    lets the message redeliver, which is safe because ``put_agent_brief`` is
+    idempotent (last-write-wins).
+    """
+
+
+def _tool_name(message: Any) -> Any:
+    name = getattr(message, "name", None)
+    if name is None and isinstance(message, dict):
+        name = message.get("name")
+    return name
+
+
+def _tool_call_names(message: Any) -> list[Any]:
+    calls = getattr(message, "tool_calls", None)
+    if calls is None and isinstance(message, dict):
+        calls = message.get("tool_calls")
+    names = []
+    for call in calls or []:
+        names.append(call.get("name") if isinstance(call, dict) else getattr(call, "name", None))
+    return names
+
+
+def _brief_was_written(result: Any) -> bool:
+    """Scan the agent's returned messages for proof that put_agent_brief ran.
+
+    Accepts both a LangGraph result dict (``{"messages": [...]}``) and any
+    object exposing ``.messages``. Evidence is a ToolMessage carrying the
+    tool ``name`` or an AIMessage ``tool_calls`` entry for the write tool.
+    """
+    if isinstance(result, dict):
+        messages = result.get("messages") or []
+    else:
+        messages = getattr(result, "messages", []) or []
+    for message in messages:
+        if _tool_name(message) == _PUT_AGENT_BRIEF_TOOL:
+            return True
+        if _PUT_AGENT_BRIEF_TOOL in _tool_call_names(message):
+            return True
+    return False
+
 
 class HandleResult(Enum):
     """Outcome of :func:`handle_case_created`, for the consumer to act on."""
@@ -100,7 +150,7 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
         return HandleResult.SKIPPED_MALFORMED
 
     try:
-        agent.invoke(
+        result = agent.invoke(
             {
                 "messages": [
                     (
@@ -127,6 +177,19 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
             case_id,
         )
         raise
+
+    if not _brief_was_written(result):
+        # The run finished without raising but never wrote the brief. Do NOT
+        # report success (that would commit the offset and lose the case).
+        logger.warning(
+            "Agent run for caseId=%s completed without calling %s; forcing "
+            "redelivery.",
+            case_id,
+            _PUT_AGENT_BRIEF_TOOL,
+        )
+        raise BriefNotWrittenError(
+            f"agent did not call {_PUT_AGENT_BRIEF_TOOL} for caseId={case_id}"
+        )
 
     logger.info("Processed case.created for caseId=%s", case_id)
     return HandleResult.PROCESSED

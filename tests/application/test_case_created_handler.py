@@ -17,12 +17,20 @@ from fraud_companion.adapters.http.errors import (
     UnauthenticatedError,
 )
 from fraud_companion.application.case_created_handler import (
+    BriefNotWrittenError,
     HandleResult,
     handle_case_created,
 )
 from fraud_companion.domain.events import CASE_CREATED_EVENT
 
 CASE_ID = "507f1f77bcf86cd799439011"
+
+
+class _ToolMessage:
+    """Minimal stand-in for a LangChain ToolMessage (carries a tool ``name``)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
 
 
 def _envelope(event_type: str = CASE_CREATED_EVENT, assigned_to: object = None) -> dict:
@@ -42,15 +50,24 @@ def _envelope(event_type: str = CASE_CREATED_EVENT, assigned_to: object = None) 
 
 
 class _FakeAgent:
-    def __init__(self, raise_on_invoke: Exception | None = None) -> None:
+    def __init__(
+        self,
+        raise_on_invoke: Exception | None = None,
+        wrote_brief: bool = True,
+    ) -> None:
         self.raise_on_invoke = raise_on_invoke
+        self.wrote_brief = wrote_brief
         self.invocations: list[dict] = []
 
     def invoke(self, input_: dict) -> dict:
         self.invocations.append(input_)
         if self.raise_on_invoke is not None:
             raise self.raise_on_invoke
-        return {"messages": []}
+        messages: list[object] = []
+        if self.wrote_brief:
+            # A successful run leaves a ToolMessage proving put_agent_brief ran.
+            messages.append(_ToolMessage("put_agent_brief"))
+        return {"messages": messages}
 
 
 def test_handle_case_created_invokes_agent_once_with_case_id() -> None:
@@ -135,6 +152,26 @@ def test_handle_case_created_skips_malformed_payload_without_raising(bad_payload
 
     assert result is HandleResult.SKIPPED_MALFORMED
     assert agent.invocations == []
+
+
+def test_handle_case_created_raises_when_brief_not_written() -> None:
+    # The agent run completed without error but never called put_agent_brief
+    # (model reasoned without acting, or a tool failure was swallowed into a
+    # ToolMessage). Reporting PROCESSED would commit the offset and silently
+    # lose the case with no brief ever written. Must raise so the message is
+    # redelivered (safe: put_agent_brief is idempotent / last-write-wins).
+    agent = _FakeAgent(wrote_brief=False)
+
+    with pytest.raises(BriefNotWrittenError):
+        handle_case_created(_envelope(), agent)
+
+
+def test_handle_case_created_processed_requires_brief_evidence() -> None:
+    agent = _FakeAgent(wrote_brief=True)
+
+    result = handle_case_created(_envelope(), agent)
+
+    assert result is HandleResult.PROCESSED
 
 
 def test_handle_case_created_accepts_string_or_null_assigned_to() -> None:

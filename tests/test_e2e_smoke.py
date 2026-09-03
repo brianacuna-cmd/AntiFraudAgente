@@ -14,6 +14,7 @@ holding end-to-end through that wiring (not just in isolation, see
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -75,6 +76,11 @@ def _make_consumer(settings: Settings, agent) -> OutboxConsumer:
 class TestFullPipelineWiring:
     def test_case_created_message_invokes_agent_once_and_commits(self, settings: Settings) -> None:
         agent = MagicMock()
+        # A successful run must leave evidence that put_agent_brief was called;
+        # otherwise the handler forces redelivery instead of committing.
+        agent.invoke.return_value = {
+            "messages": [SimpleNamespace(name="put_agent_brief")]
+        }
         consumer = _make_consumer(settings, agent)
 
         consumer.process_message(_case_created_message("case-123"))
