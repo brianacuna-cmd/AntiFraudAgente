@@ -1,0 +1,122 @@
+"""Tests for the case.created application handler (Slice 8).
+
+The handler is the pure application-layer orchestration between the future
+Kafka consumer and the compiled Gemini agent. It never calls the anti-fraud
+HTTP tools directly — it drives the agent, which is responsible for calling
+``get_analysis_pack`` then ``put_agent_brief`` itself. No network, no real
+LLM: the agent object is fully mocked.
+"""
+from __future__ import annotations
+
+import pytest
+
+from fraud_companion.adapters.http.errors import (
+    ApiError,
+    CaseClosedError,
+    CaseNotFoundError,
+    UnauthenticatedError,
+)
+from fraud_companion.application.case_created_handler import (
+    HandleResult,
+    handle_case_created,
+)
+from fraud_companion.domain.events import CASE_CREATED_EVENT
+
+CASE_ID = "507f1f77bcf86cd799439011"
+
+
+def _envelope(event_type: str = CASE_CREATED_EVENT, assigned_to: object = None) -> dict:
+    return {
+        "eventType": event_type,
+        "payload": {
+            "caseId": CASE_ID,
+            "organizationId": "org-1",
+            "customerId": "cust-1",
+            "riskScore": 87,
+            "status": "OPEN",
+            "priority": "HIGH",
+            "assignedTo": assigned_to,
+            "createdAt": "2026-09-03T00:00:00Z",
+        },
+    }
+
+
+class _FakeAgent:
+    def __init__(self, raise_on_invoke: Exception | None = None) -> None:
+        self.raise_on_invoke = raise_on_invoke
+        self.invocations: list[dict] = []
+
+    def invoke(self, input_: dict) -> dict:
+        self.invocations.append(input_)
+        if self.raise_on_invoke is not None:
+            raise self.raise_on_invoke
+        return {"messages": []}
+
+
+def test_handle_case_created_invokes_agent_once_with_case_id() -> None:
+    agent = _FakeAgent()
+
+    result = handle_case_created(_envelope(), agent)
+
+    assert result is HandleResult.PROCESSED
+    assert len(agent.invocations) == 1
+    invoked_input = agent.invocations[0]
+    # The caseId must appear somewhere in the initial message content sent
+    # to the agent.
+    serialized = str(invoked_input)
+    assert CASE_ID in serialized
+
+
+def test_handle_case_created_ignores_wrong_event_type() -> None:
+    agent = _FakeAgent()
+
+    result = handle_case_created(_envelope(event_type="case.updated"), agent)
+
+    assert result is HandleResult.SKIPPED_IGNORED
+    assert agent.invocations == []
+
+
+def test_handle_case_created_is_idempotent_across_replays() -> None:
+    agent = _FakeAgent()
+
+    first = handle_case_created(_envelope(), agent)
+    second = handle_case_created(_envelope(), agent)
+
+    assert first is HandleResult.PROCESSED
+    assert second is HandleResult.PROCESSED
+    assert len(agent.invocations) == 2
+
+
+@pytest.mark.parametrize("error_cls", [CaseNotFoundError, CaseClosedError])
+def test_handle_case_created_treats_terminal_errors_as_processed(error_cls) -> None:
+    error = error_cls(status=404, code="CASE_NOT_FOUND", message="not found")
+    agent = _FakeAgent(raise_on_invoke=error)
+
+    result = handle_case_created(_envelope(), agent)
+
+    assert result is HandleResult.SKIPPED_TERMINAL
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ApiError(status=500, code=None, message="boom"),
+        UnauthenticatedError(status=401, code="UNAUTHENTICATED", message="no"),
+        ConnectionError("network down"),
+    ],
+)
+def test_handle_case_created_reraises_retryable_errors(error) -> None:
+    agent = _FakeAgent(raise_on_invoke=error)
+
+    with pytest.raises(type(error)):
+        handle_case_created(_envelope(), agent)
+
+
+def test_handle_case_created_accepts_string_or_null_assigned_to() -> None:
+    agent = _FakeAgent()
+
+    result_str = handle_case_created(_envelope(assigned_to="user-1"), agent)
+    result_null = handle_case_created(_envelope(assigned_to=None), agent)
+
+    assert result_str is HandleResult.PROCESSED
+    assert result_null is HandleResult.PROCESSED
