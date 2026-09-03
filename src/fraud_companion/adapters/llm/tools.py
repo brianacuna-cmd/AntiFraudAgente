@@ -1,9 +1,10 @@
-"""LangChain StructuredTools for the two required agent tools.
+"""LangChain StructuredTools for the four allow-listed agent tools.
 
-Only ``get_analysis_pack`` (read) and ``put_agent_brief`` (the sole write)
-are implemented here. ``list_cases`` and ``list_aml_alerts`` are a later
-slice. Both tools are thin wrappers over ``AntiFraudHttpClient``; they do
-not interpret, reshape, or invent data — that is the LLM's job.
+``get_analysis_pack`` (read) and ``put_agent_brief`` (the sole write) are
+required. ``list_cases`` and ``list_aml_alerts`` are optional read tools
+the agent may use for extra chat context. All four are thin wrappers over
+``AntiFraudHttpClient``; they do not interpret, reshape, or invent data —
+that is the LLM's job.
 
 Tool names MUST match the entries in
 ``fraud_companion.domain.tools_spec.ALLOWED_TOOLS`` exactly.
@@ -59,6 +60,22 @@ class PutAgentBriefArgs(BaseModel):
     brief: str = Field(..., description="The analyst brief text to persist.")
 
 
+class ListCasesArgs(BaseModel):
+    """Arguments for ``list_cases``."""
+
+    customer_id: str = Field(..., description="Customer identifier to filter cases by.")
+    limit: int = Field(20, ge=1, le=100, description="Max number of items to return (1-100).")
+    offset: int = Field(0, ge=0, description="Pagination offset.")
+
+
+class ListAmlAlertsArgs(BaseModel):
+    """Arguments for ``list_aml_alerts``."""
+
+    customer_id: str = Field(..., description="Customer identifier to filter AML alerts by.")
+    limit: int = Field(20, ge=1, le=100, description="Max number of items to return (1-100).")
+    offset: int = Field(0, ge=0, description="Pagination offset.")
+
+
 def build_get_analysis_pack_tool(http_client: AntiFraudHttpClient) -> StructuredTool:
     """Build the read-only ``get_analysis_pack`` StructuredTool."""
 
@@ -87,4 +104,52 @@ def build_put_agent_brief_tool(http_client: AntiFraudHttpClient) -> StructuredTo
         name="put_agent_brief",
         description=_PUT_AGENT_BRIEF_DESCRIPTION,
         args_schema=PutAgentBriefArgs,
+    )
+
+
+_LIST_CASES_DESCRIPTION = """\
+List cases for a customer (query param customerId, camelCase). Returns
+{items, total} exactly as returned by the anti-fraud API — no reshaping.
+The tenant is derived from the API key; organizationId/organization_id is
+NEVER sent as a query parameter.
+"""
+
+_LIST_AML_ALERTS_DESCRIPTION = """\
+List AML alerts for a customer (query param customerId, camelCase — even
+though the underlying store uses snake_case elsewhere). Returns
+{items, total} exactly as returned by the anti-fraud API — no reshaping.
+"""
+
+
+def build_list_cases_tool(http_client: AntiFraudHttpClient) -> StructuredTool:
+    """Build the optional read-only ``list_cases`` StructuredTool."""
+
+    def _list_cases(customer_id: str, limit: int = 20, offset: int = 0) -> Any:
+        return http_client.get(
+            "/cases",
+            params={"customerId": customer_id, "limit": limit, "offset": offset},
+        )
+
+    return StructuredTool.from_function(
+        func=_list_cases,
+        name="list_cases",
+        description=_LIST_CASES_DESCRIPTION,
+        args_schema=ListCasesArgs,
+    )
+
+
+def build_list_aml_alerts_tool(http_client: AntiFraudHttpClient) -> StructuredTool:
+    """Build the optional read-only ``list_aml_alerts`` StructuredTool."""
+
+    def _list_aml_alerts(customer_id: str, limit: int = 20, offset: int = 0) -> Any:
+        return http_client.get(
+            "/aml-alerts",
+            params={"customerId": customer_id, "limit": limit, "offset": offset},
+        )
+
+    return StructuredTool.from_function(
+        func=_list_aml_alerts,
+        name="list_aml_alerts",
+        description=_LIST_AML_ALERTS_DESCRIPTION,
+        args_schema=ListAmlAlertsArgs,
     )

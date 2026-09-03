@@ -10,8 +10,14 @@ import pytest
 
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
 from fraud_companion.adapters.http.errors import CaseClosedError, CaseNotFoundError, ForbiddenRoleError
-from fraud_companion.adapters.llm.tools import build_get_analysis_pack_tool, build_put_agent_brief_tool
+from fraud_companion.adapters.llm.tools import (
+    build_get_analysis_pack_tool,
+    build_list_aml_alerts_tool,
+    build_list_cases_tool,
+    build_put_agent_brief_tool,
+)
 from fraud_companion.domain.brief import BriefValidationError
+from fraud_companion.domain.tools_spec import ALLOWED_TOOLS
 
 
 @pytest.fixture
@@ -110,3 +116,91 @@ class TestPutAgentBriefTool:
         assert "brief" in schema.model_fields
         assert schema.model_fields["case_id"].is_required()
         assert schema.model_fields["brief"].is_required()
+
+
+class TestListCasesTool:
+    def test_name_matches_allow_list(self, http_client: MagicMock) -> None:
+        tool = build_list_cases_tool(http_client)
+        assert tool.name == "list_cases"
+
+    def test_sends_customer_id_camel_case_and_never_organization_id(
+        self, http_client: MagicMock
+    ) -> None:
+        http_client.get.return_value = {"items": [], "total": 0}
+
+        tool = build_list_cases_tool(http_client)
+        result = tool.invoke({"customer_id": "cust-1"})
+
+        http_client.get.assert_called_once_with(
+            "/cases", params={"customerId": "cust-1", "limit": 20, "offset": 0}
+        )
+        called_params = http_client.get.call_args.kwargs["params"]
+        assert "organizationId" not in called_params
+        assert "organization_id" not in called_params
+        assert result == {"items": [], "total": 0}
+
+    def test_limit_and_offset_passed_through(self, http_client: MagicMock) -> None:
+        http_client.get.return_value = {"items": [], "total": 0}
+
+        tool = build_list_cases_tool(http_client)
+        tool.invoke({"customer_id": "cust-1", "limit": 5, "offset": 10})
+
+        http_client.get.assert_called_once_with(
+            "/cases", params={"customerId": "cust-1", "limit": 5, "offset": 10}
+        )
+
+    def test_has_pydantic_arg_schema_with_required_customer_id(
+        self, http_client: MagicMock
+    ) -> None:
+        tool = build_list_cases_tool(http_client)
+        schema = tool.args_schema
+        assert "customer_id" in schema.model_fields
+        assert schema.model_fields["customer_id"].is_required()
+
+
+class TestListAmlAlertsTool:
+    def test_name_matches_allow_list(self, http_client: MagicMock) -> None:
+        tool = build_list_aml_alerts_tool(http_client)
+        assert tool.name == "list_aml_alerts"
+
+    def test_sends_customer_id_camel_case(self, http_client: MagicMock) -> None:
+        http_client.get.return_value = {"items": [], "total": 0}
+
+        tool = build_list_aml_alerts_tool(http_client)
+        result = tool.invoke({"customer_id": "cust-1"})
+
+        http_client.get.assert_called_once_with(
+            "/aml-alerts", params={"customerId": "cust-1", "limit": 20, "offset": 0}
+        )
+        assert result == {"items": [], "total": 0}
+
+    def test_limit_and_offset_passed_through(self, http_client: MagicMock) -> None:
+        http_client.get.return_value = {"items": [], "total": 0}
+
+        tool = build_list_aml_alerts_tool(http_client)
+        tool.invoke({"customer_id": "cust-1", "limit": 5, "offset": 10})
+
+        http_client.get.assert_called_once_with(
+            "/aml-alerts", params={"customerId": "cust-1", "limit": 5, "offset": 10}
+        )
+
+    def test_has_pydantic_arg_schema_with_required_customer_id(
+        self, http_client: MagicMock
+    ) -> None:
+        tool = build_list_aml_alerts_tool(http_client)
+        schema = tool.args_schema
+        assert "customer_id" in schema.model_fields
+        assert schema.model_fields["customer_id"].is_required()
+
+
+def test_all_four_tools_names_match_allowed_tools() -> None:
+    from unittest.mock import MagicMock as _MagicMock
+
+    http_client = _MagicMock(spec=AntiFraudHttpClient)
+    tools = [
+        build_get_analysis_pack_tool(http_client),
+        build_put_agent_brief_tool(http_client),
+        build_list_cases_tool(http_client),
+        build_list_aml_alerts_tool(http_client),
+    ]
+    assert {tool.name for tool in tools} == ALLOWED_TOOLS
