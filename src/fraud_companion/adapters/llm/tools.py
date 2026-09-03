@@ -11,13 +11,34 @@ Tool names MUST match the entries in
 """
 from __future__ import annotations
 
-from typing import Any
+import functools
+from typing import Any, Callable
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
+from fraud_companion.application.tool_dispatcher import assert_dispatch_allowed
 from fraud_companion.domain.brief import Brief
+
+
+def _guard_dispatch(tool_name: str, func: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap ``func`` so that, before doing anything else, it calls
+    :func:`assert_dispatch_allowed` for ``tool_name``.
+
+    This is the application-level dispatcher guardrail (layer 2) wired
+    directly into the real tool-execution path: even if the LangGraph
+    ``wrap_tool_call`` middleware (layer 1) were bypassed or
+    misconfigured, the tool body itself refuses to run under a
+    disallowed name.
+    """
+
+    @functools.wraps(func)
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        assert_dispatch_allowed(tool_name)
+        return func(*args, **kwargs)
+
+    return _wrapped
 
 _GET_ANALYSIS_PACK_DESCRIPTION = """\
 Fetch the full analysis pack for a case BEFORE writing an agent brief.
@@ -83,7 +104,7 @@ def build_get_analysis_pack_tool(http_client: AntiFraudHttpClient) -> Structured
         return http_client.get(f"/cases/{case_id}/analysis-pack")
 
     return StructuredTool.from_function(
-        func=_get_analysis_pack,
+        func=_guard_dispatch("get_analysis_pack", _get_analysis_pack),
         name="get_analysis_pack",
         description=_GET_ANALYSIS_PACK_DESCRIPTION,
         args_schema=GetAnalysisPackArgs,
@@ -100,7 +121,7 @@ def build_put_agent_brief_tool(http_client: AntiFraudHttpClient) -> StructuredTo
         )
 
     return StructuredTool.from_function(
-        func=_put_agent_brief,
+        func=_guard_dispatch("put_agent_brief", _put_agent_brief),
         name="put_agent_brief",
         description=_PUT_AGENT_BRIEF_DESCRIPTION,
         args_schema=PutAgentBriefArgs,
@@ -131,7 +152,7 @@ def build_list_cases_tool(http_client: AntiFraudHttpClient) -> StructuredTool:
         )
 
     return StructuredTool.from_function(
-        func=_list_cases,
+        func=_guard_dispatch("list_cases", _list_cases),
         name="list_cases",
         description=_LIST_CASES_DESCRIPTION,
         args_schema=ListCasesArgs,
@@ -148,7 +169,7 @@ def build_list_aml_alerts_tool(http_client: AntiFraudHttpClient) -> StructuredTo
         )
 
     return StructuredTool.from_function(
-        func=_list_aml_alerts,
+        func=_guard_dispatch("list_aml_alerts", _list_aml_alerts),
         name="list_aml_alerts",
         description=_LIST_AML_ALERTS_DESCRIPTION,
         args_schema=ListAmlAlertsArgs,

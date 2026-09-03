@@ -4,7 +4,7 @@ get_analysis_pack is read-only; put_agent_brief is the only write tool.
 """
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,7 +17,7 @@ from fraud_companion.adapters.llm.tools import (
     build_put_agent_brief_tool,
 )
 from fraud_companion.domain.brief import BriefValidationError
-from fraud_companion.domain.tools_spec import ALLOWED_TOOLS
+from fraud_companion.domain.tools_spec import ALLOWED_TOOLS, DisallowedToolError
 
 
 @pytest.fixture
@@ -191,6 +191,96 @@ class TestListAmlAlertsTool:
         schema = tool.args_schema
         assert "customer_id" in schema.model_fields
         assert schema.model_fields["customer_id"].is_required()
+
+
+class TestDispatcherGuardWiredIntoRealTools:
+    """Proves layer 2 (application/tool_dispatcher.assert_dispatch_allowed) is
+    actually invoked from the REAL production tool-execution path, not just
+    exercised by a test-authored mock. Each StructuredTool's underlying
+    function must call assert_dispatch_allowed(<its own name>) before doing
+    anything else, so even if the LangGraph middleware layer were bypassed
+    or misconfigured, the tool body itself refuses to run.
+    """
+
+    def test_get_analysis_pack_tool_calls_real_dispatcher_before_http(
+        self, http_client: MagicMock
+    ) -> None:
+        tool = build_get_analysis_pack_tool(http_client)
+
+        with patch(
+            "fraud_companion.adapters.llm.tools.assert_dispatch_allowed",
+            side_effect=DisallowedToolError("get_analysis_pack"),
+        ) as mock_dispatch:
+            with pytest.raises(DisallowedToolError):
+                tool.invoke({"case_id": "1"})
+
+        mock_dispatch.assert_called_once_with("get_analysis_pack")
+        http_client.get.assert_not_called()
+
+    def test_put_agent_brief_tool_calls_real_dispatcher_before_http(
+        self, http_client: MagicMock
+    ) -> None:
+        tool = build_put_agent_brief_tool(http_client)
+
+        with patch(
+            "fraud_companion.adapters.llm.tools.assert_dispatch_allowed",
+            side_effect=DisallowedToolError("put_agent_brief"),
+        ) as mock_dispatch:
+            with pytest.raises(DisallowedToolError):
+                tool.invoke({"case_id": "1", "brief": "hi"})
+
+        mock_dispatch.assert_called_once_with("put_agent_brief")
+        http_client.put.assert_not_called()
+
+    def test_list_cases_tool_calls_real_dispatcher_before_http(
+        self, http_client: MagicMock
+    ) -> None:
+        tool = build_list_cases_tool(http_client)
+
+        with patch(
+            "fraud_companion.adapters.llm.tools.assert_dispatch_allowed",
+            side_effect=DisallowedToolError("list_cases"),
+        ) as mock_dispatch:
+            with pytest.raises(DisallowedToolError):
+                tool.invoke({"customer_id": "cust-1"})
+
+        mock_dispatch.assert_called_once_with("list_cases")
+        http_client.get.assert_not_called()
+
+    def test_list_aml_alerts_tool_calls_real_dispatcher_before_http(
+        self, http_client: MagicMock
+    ) -> None:
+        tool = build_list_aml_alerts_tool(http_client)
+
+        with patch(
+            "fraud_companion.adapters.llm.tools.assert_dispatch_allowed",
+            side_effect=DisallowedToolError("list_aml_alerts"),
+        ) as mock_dispatch:
+            with pytest.raises(DisallowedToolError):
+                tool.invoke({"customer_id": "cust-1"})
+
+        mock_dispatch.assert_called_once_with("list_aml_alerts")
+        http_client.get.assert_not_called()
+
+    def test_tool_built_under_disallowed_name_is_rejected_by_real_dispatcher(
+        self, http_client: MagicMock
+    ) -> None:
+        """A tool registered under a name outside ALLOWED_TOOLS (e.g. from
+        future drift/misconfiguration) must be rejected by the real
+        production ``assert_dispatch_allowed`` call baked into the tool
+        wrapper itself — not by any test-authored mock side effect.
+        """
+        from fraud_companion.adapters.llm.tools import _guard_dispatch
+
+        def _fake_get_analysis_pack(case_id: str):  # pragma: no cover - must not run
+            return http_client.get(f"/cases/{case_id}/analysis-pack")
+
+        guarded = _guard_dispatch("resolve_case", _fake_get_analysis_pack)
+
+        with pytest.raises(DisallowedToolError):
+            guarded(case_id="1")
+
+        http_client.get.assert_not_called()
 
 
 def test_all_four_tools_names_match_allowed_tools() -> None:
