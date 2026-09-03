@@ -53,6 +53,23 @@ def test_kafka_outbox_topic_can_be_overridden(monkeypatch):
     assert settings.kafka_outbox_topic == "custom.topic"
 
 
+def test_gemini_model_has_a_sensible_default(monkeypatch):
+    _set_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.gemini_model
+    assert isinstance(settings.gemini_model, str)
+
+
+def test_gemini_model_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"GEMINI_MODEL": "gemini-custom-model"})
+
+    settings = Settings.from_env()
+
+    assert settings.gemini_model == "gemini-custom-model"
+
+
 @pytest.mark.parametrize(
     "missing_var",
     [

@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass, field
 
 DEFAULT_KAFKA_OUTBOX_TOPIC = "outbox.events"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 _REQUIRED_ENV_VARS = (
     "ANTI_FRAUD_BASE_URL",
@@ -40,6 +41,7 @@ class Settings:
     kafka_group_id: str
     kafka_organization_id: str
     kafka_outbox_topic: str = field(default=DEFAULT_KAFKA_OUTBOX_TOPIC)
+    gemini_model: str = field(default=DEFAULT_GEMINI_MODEL)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -62,6 +64,7 @@ class Settings:
             kafka_outbox_topic=source.get(
                 "KAFKA_OUTBOX_TOPIC", DEFAULT_KAFKA_OUTBOX_TOPIC
             ),
+            gemini_model=source.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
         )
 
     def __repr__(self) -> str:
