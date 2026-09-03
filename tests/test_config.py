@@ -70,6 +70,51 @@ def test_gemini_model_can_be_overridden(monkeypatch):
     assert settings.gemini_model == "gemini-custom-model"
 
 
+def test_delivery_retry_settings_have_sensible_defaults(monkeypatch):
+    _set_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.kafka_max_delivery_attempts >= 1
+    assert isinstance(settings.kafka_max_delivery_attempts, int)
+    assert settings.kafka_retry_backoff_seconds >= 0
+    assert isinstance(settings.kafka_retry_backoff_seconds, float)
+    assert settings.kafka_on_exhausted == "crash"
+
+
+def test_delivery_retry_settings_can_be_overridden(monkeypatch):
+    _set_env(
+        monkeypatch,
+        overrides={
+            "KAFKA_MAX_DELIVERY_ATTEMPTS": "7",
+            "KAFKA_RETRY_BACKOFF_SECONDS": "2.5",
+            "KAFKA_ON_EXHAUSTED": "skip",
+        },
+    )
+
+    settings = Settings.from_env()
+
+    assert settings.kafka_max_delivery_attempts == 7
+    assert settings.kafka_retry_backoff_seconds == 2.5
+    assert settings.kafka_on_exhausted == "skip"
+
+
+@pytest.mark.parametrize("bad_value", ["dead_letter", "retry", "", "CRASH!"])
+def test_invalid_on_exhausted_rejected(monkeypatch, bad_value):
+    _set_env(monkeypatch, overrides={"KAFKA_ON_EXHAUSTED": bad_value})
+
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "abc"])
+def test_invalid_max_delivery_attempts_rejected(monkeypatch, bad_value):
+    _set_env(monkeypatch, overrides={"KAFKA_MAX_DELIVERY_ATTEMPTS": bad_value})
+
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
 @pytest.mark.parametrize(
     "missing_var",
     [

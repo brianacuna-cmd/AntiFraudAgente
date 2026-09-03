@@ -9,6 +9,13 @@ from dataclasses import dataclass, field
 
 DEFAULT_KAFKA_OUTBOX_TOPIC = "outbox.events"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS = 5
+DEFAULT_KAFKA_RETRY_BACKOFF_SECONDS = 1.0
+DEFAULT_KAFKA_ON_EXHAUSTED = "crash"
+#: Supported terminal actions when a message exhausts its delivery attempts.
+#: "dead_letter" is intentionally NOT yet supported (needs a producer + DLQ
+#: topic); see docs/design/consumer-error-handling.md.
+_ON_EXHAUSTED_CHOICES = frozenset({"crash", "skip"})
 
 _REQUIRED_ENV_VARS = (
     "ANTI_FRAUD_BASE_URL",
@@ -20,6 +27,39 @@ _REQUIRED_ENV_VARS = (
 )
 
 _SECRET_FIELDS = frozenset({"anti_fraud_agent_api_key", "google_api_key"})
+
+
+def _parse_positive_int(raw: str | None, default: int, var_name: str) -> int:
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{var_name} must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{var_name} must be >= 1, got {value}")
+    return value
+
+
+def _parse_non_negative_float(raw: str | None, default: float, var_name: str) -> float:
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{var_name} must be a number, got {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"{var_name} must be >= 0, got {value}")
+    return value
+
+
+def _parse_on_exhausted(raw: str) -> str:
+    if raw not in _ON_EXHAUSTED_CHOICES:
+        choices = ", ".join(sorted(_ON_EXHAUSTED_CHOICES))
+        raise ValueError(
+            f"KAFKA_ON_EXHAUSTED must be one of {{{choices}}}, got {raw!r}"
+        )
+    return raw
 
 
 class MissingSettingError(RuntimeError):
@@ -42,6 +82,13 @@ class Settings:
     kafka_organization_id: str
     kafka_outbox_topic: str = field(default=DEFAULT_KAFKA_OUTBOX_TOPIC)
     gemini_model: str = field(default=DEFAULT_GEMINI_MODEL)
+    kafka_max_delivery_attempts: int = field(
+        default=DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS
+    )
+    kafka_retry_backoff_seconds: float = field(
+        default=DEFAULT_KAFKA_RETRY_BACKOFF_SECONDS
+    )
+    kafka_on_exhausted: str = field(default=DEFAULT_KAFKA_ON_EXHAUSTED)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -65,6 +112,19 @@ class Settings:
                 "KAFKA_OUTBOX_TOPIC", DEFAULT_KAFKA_OUTBOX_TOPIC
             ),
             gemini_model=source.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
+            kafka_max_delivery_attempts=_parse_positive_int(
+                source.get("KAFKA_MAX_DELIVERY_ATTEMPTS"),
+                DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS,
+                "KAFKA_MAX_DELIVERY_ATTEMPTS",
+            ),
+            kafka_retry_backoff_seconds=_parse_non_negative_float(
+                source.get("KAFKA_RETRY_BACKOFF_SECONDS"),
+                DEFAULT_KAFKA_RETRY_BACKOFF_SECONDS,
+                "KAFKA_RETRY_BACKOFF_SECONDS",
+            ),
+            kafka_on_exhausted=_parse_on_exhausted(
+                source.get("KAFKA_ON_EXHAUSTED", DEFAULT_KAFKA_ON_EXHAUSTED)
+            ),
         )
 
     def __repr__(self) -> str:

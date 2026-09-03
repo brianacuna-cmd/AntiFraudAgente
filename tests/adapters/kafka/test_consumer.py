@@ -27,6 +27,7 @@ class _FakeMessage:
         error=None,
         topic="outbox.events",
         offset=0,
+        partition=0,
     ):
         self._headers = headers
         self._value = value
@@ -34,6 +35,7 @@ class _FakeMessage:
         self._error = error
         self._topic = topic
         self._offset = offset
+        self._partition = partition
 
     def headers(self):
         return self._headers
@@ -52,6 +54,9 @@ class _FakeMessage:
 
     def offset(self):
         return self._offset
+
+    def partition(self):
+        return self._partition
 
 
 @pytest.fixture
@@ -179,42 +184,119 @@ def test_retryable_error_from_handler_does_not_commit(mock_consumer_cls, setting
     mock_consumer.commit.assert_not_called()
 
 
+def _retry_settings(**overrides) -> Settings:
+    base = dict(
+        anti_fraud_base_url="https://api.example.com",
+        anti_fraud_agent_api_key="agent-key",
+        google_api_key="google-key",
+        kafka_bootstrap_servers="localhost:9092",
+        kafka_group_id="fraud-companion",
+        kafka_organization_id="org-1",
+        kafka_retry_backoff_seconds=0.0,  # no real sleeping in tests
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
 @patch("fraud_companion.adapters.kafka.consumer.Consumer")
-def test_run_survives_per_message_exception_and_keeps_polling(
-    mock_consumer_cls, settings, fake_agent
+def test_run_seeks_back_and_retries_failed_message_then_commits(
+    mock_consumer_cls, fake_agent
 ):
-    # A single failing message must NOT crash the whole poll loop (which would
-    # take the entire consumer down and, on restart, redeliver and crash again
-    # forever). run() must isolate per-message failures and keep polling.
+    # On a retryable failure the loop must NOT advance past the message (which
+    # with per-partition commit would silently skip/lose it). It must seek back
+    # to the failed offset and retry; a later success then commits.
     mock_consumer = MagicMock()
     mock_consumer_cls.return_value = mock_consumer
 
-    bad = _FakeMessage(
+    msg = _FakeMessage(
         headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
         value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        topic="outbox.events",
+        partition=3,
+        offset=42,
     )
-    good = _FakeMessage(
-        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
-        value=json.dumps(_case_created_envelope("case-ok")).encode("utf-8"),
-    )
-    mock_consumer.poll.side_effect = [bad, good]
+    mock_consumer.poll.side_effect = [msg, msg]  # redelivery of the same message
 
     checks = {"n": 0}
 
     def stop() -> bool:
         checks["n"] += 1
-        return checks["n"] > 2  # allow exactly two iterations
+        return checks["n"] > 2
 
     with patch(
         "fraud_companion.adapters.kafka.consumer.handle_case_created",
-        side_effect=[RuntimeError("boom"), HandleResult.PROCESSED],
+        side_effect=[RuntimeError("transient"), HandleResult.PROCESSED],
+    ):
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent)
+        consumer.run(should_stop=stop, poll_timeout=0)  # must not raise
+
+    # Sought back to the exact failed offset, and committed only after success.
+    assert mock_consumer.seek.call_count == 1
+    tp = mock_consumer.seek.call_args.args[0]
+    assert (tp.topic, tp.partition, tp.offset) == ("outbox.events", 3, 42)
+    mock_consumer.commit.assert_called_once_with(msg)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_run_crashes_after_max_delivery_attempts_when_on_exhausted_crash(
+    mock_consumer_cls, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=5,
+    )
+    mock_consumer.poll.return_value = msg  # always the same failing message
+
+    settings = _retry_settings(kafka_max_delivery_attempts=2, kafka_on_exhausted="crash")
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=RuntimeError("permanent"),
     ):
         consumer = OutboxConsumer(settings=settings, agent=fake_agent)
-        # Must not raise despite the first message failing.
-        consumer.run(should_stop=stop, poll_timeout=0)
+        with pytest.raises(RuntimeError):
+            consumer.run(should_stop=lambda: False, poll_timeout=0)
 
-    # Second (good) message still processed and committed after the first failed.
-    mock_consumer.commit.assert_called_once_with(good)
+    # Never committed a message it could not process.
+    mock_consumer.commit.assert_not_called()
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_run_skips_and_commits_after_max_attempts_when_on_exhausted_skip(
+    mock_consumer_cls, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=9,
+    )
+    mock_consumer.poll.return_value = msg
+
+    settings = _retry_settings(kafka_max_delivery_attempts=2, kafka_on_exhausted="skip")
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 3  # give the loop room to exhaust then continue
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=RuntimeError("permanent"),
+    ):
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent)
+        consumer.run(should_stop=stop, poll_timeout=0)  # must not raise
+
+    # After exhausting attempts, the poison message is explicitly committed
+    # (skipped) so the partition can progress.
+    mock_consumer.commit.assert_called_once_with(msg)
 
 
 @pytest.mark.parametrize("result", [HandleResult.PROCESSED, HandleResult.SKIPPED_TERMINAL])
