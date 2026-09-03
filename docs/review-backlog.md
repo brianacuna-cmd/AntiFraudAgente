@@ -43,7 +43,17 @@ original crash-loop for silent message loss.
   explicitly. Fix #4 (`fix(kafka): isolate per-message failures...`) must be
   reworked, not kept as-is.
 
-### B2 — Terminal-error assumption unproven under LangGraph ToolNode
+### B2 — Terminal-error handling — ✅ DONE
+
+Implemented (183 tests green). Verified end-to-end that `create_agent`
+propagates `CaseNotFoundError`/`CaseClosedError` with the default handler
+(the `except` path handles production). Added a defensive result-inspection
+path (`CASE_NOT_FOUND`/`CASE_CLOSED` error-status ToolMessages ->
+`SKIPPED_TERMINAL`) for the `handle_tool_errors=True` mode, plus an
+integration test through the real `create_agent`/ToolNode path. Original
+finding text kept below for the record.
+
+#### (original) Terminal-error assumption unproven under LangGraph ToolNode
 `handle_case_created`'s `except (CaseNotFoundError, CaseClosedError)` assumes
 those exceptions propagate out of `agent.invoke()`. LangGraph's `ToolNode`
 (under `create_agent`) by default catches tool-body exceptions and converts
