@@ -122,6 +122,27 @@ Make terminal handling robust to **both** propagation modes (belt + suspenders):
   test: an error-status terminal ToolMessage in the result → `SKIPPED_TERMINAL`
   via result inspection (covers the `handle_tool_errors=True` mode).
 
+## Known tradeoff — head-of-line blocking (accepted)
+
+The B1 retry is a synchronous `seek()` + `sleep()` on the single poll thread.
+On a multi-partition subscription, a retryable failure on one message delays
+processing of all other partitions for the cumulative backoff of that message's
+retries. This is a **deliberate choice of correctness (at-least-once, no silent
+skip) over cross-partition availability**, and it is **bounded**, not infinite:
+
+- `kafka_on_exhausted=crash` (default): after `kafka_max_delivery_attempts` the
+  consumer raises and the loop exits — total block ≈ `backoff * (1+2+…+(N-1))`
+  before crash (≈10s with defaults), not indefinite.
+- `kafka_on_exhausted=skip`: after exhaustion the message is committed and the
+  loop moves on immediately.
+
+This is acceptable for a single- or low-partition outbox consumer. If throughput
+across many partitions matters, the resolution is a larger change (out of scope
+here): per-partition `pause()`/`resume()` so only the failing partition backs
+off, or an async/DLQ path so the poll thread never blocks. Tracked as future
+work alongside the DLQ item. Flagged by RDD review (R3-blocking-retry-loop) and
+accepted as a conscious tradeoff, not a defect.
+
 ## Effort / sequencing
 Moderate. Land B2 first (small: result-inspection helper + two tests; no infra),
 then B1 Option 1 (config + attempt tracking + seek/backoff). Defer B1 Option 2

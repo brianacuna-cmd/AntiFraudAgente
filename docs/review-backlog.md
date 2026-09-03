@@ -81,6 +81,18 @@ is detected given ToolNode swallows exceptions, and the offset action for each
 (commit / redeliver-with-backoff / DLQ). Add tests that drive the real
 `create_agent`/`ToolNode` path (not just a fake agent) for the terminal case.
 
+## Future work (accepted tradeoffs / not blocking)
+
+- **Head-of-line blocking (RDD R3-blocking-retry-loop, accepted).** B1's
+  synchronous seek+backoff retry blocks other partitions during a message's
+  retries. Bounded (crash after N attempts / skip commits and moves on), and a
+  deliberate correctness-over-availability choice for a low-partition outbox
+  consumer. Resolve with per-partition `pause()`/`resume()` or async/DLQ if
+  many-partition throughput becomes a requirement. See
+  [design/consumer-error-handling.md](design/consumer-error-handling.md).
+- **Dead-letter topic** for `kafka_on_exhausted=dead_letter` — needs a Kafka
+  producer + DLQ topic.
+
 ## Notes
 - RDD reviews left several abandoned lineages (each commit invalidated the
   prior frozen candidate). Delivery is human-owned; no receipt was burned for
