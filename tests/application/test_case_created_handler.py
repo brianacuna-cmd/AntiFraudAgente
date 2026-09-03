@@ -27,11 +27,12 @@ CASE_ID = "507f1f77bcf86cd799439011"
 
 
 class _ToolMessage:
-    """Minimal stand-in for a LangChain ToolMessage (name + status)."""
+    """Minimal stand-in for a LangChain ToolMessage (name + status + content)."""
 
-    def __init__(self, name: str, status: str = "success") -> None:
+    def __init__(self, name: str, status: str = "success", content: str = "") -> None:
         self.name = name
         self.status = status
+        self.content = content
 
 
 def _envelope(event_type: str = CASE_CREATED_EVENT, assigned_to: object = None) -> dict:
@@ -166,6 +167,36 @@ def test_handle_case_created_skips_non_dict_envelope(bad_envelope) -> None:
 
     assert result is HandleResult.SKIPPED_MALFORMED
     assert agent.invocations == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["CASE_NOT_FOUND", "CASE_CLOSED"],
+)
+def test_handle_case_created_maps_terminal_error_toolmessage_to_skipped_terminal(code) -> None:
+    # If ToolNode is configured to convert tool exceptions into error-status
+    # ToolMessages (handle_tool_errors=True/str), a terminal error (case not
+    # found / closed) surfaces as an error ToolMessage and the run completes
+    # without raising. It must be classified SKIPPED_TERMINAL (committable),
+    # NOT BriefNotWrittenError (which would redeliver a case that can never
+    # succeed). This keeps the pipeline correct regardless of the ToolNode
+    # error-handling mode.
+    class _TerminalToolMsgAgent(_FakeAgent):
+        def invoke(self, input_: dict) -> dict:
+            self.invocations.append(input_)
+            return {
+                "messages": [
+                    _ToolMessage(
+                        "get_analysis_pack",
+                        status="error",
+                        content=f"Error: CaseError('[4xx] {code}: nope')",
+                    )
+                ]
+            }
+
+    result = handle_case_created(_envelope(), _TerminalToolMsgAgent())
+
+    assert result is HandleResult.SKIPPED_TERMINAL
 
 
 def test_handle_case_created_raises_when_brief_tool_errored() -> None:

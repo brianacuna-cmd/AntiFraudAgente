@@ -42,6 +42,12 @@ _TERMINAL_ERROR_TYPES = (CaseNotFoundError, CaseClosedError)
 #: Name of the sole write tool; a completed run must show evidence it ran.
 _PUT_AGENT_BRIEF_TOOL = "put_agent_brief"
 
+#: Stable API error codes that mean the case can never be processed. If
+#: ToolNode is configured to convert tool exceptions into error-status
+#: ToolMessages (handle_tool_errors=True/str), these surface in message
+#: content instead of propagating as CaseNotFoundError/CaseClosedError.
+_TERMINAL_ERROR_CODES = ("CASE_NOT_FOUND", "CASE_CLOSED")
+
 
 class BriefNotWrittenError(RuntimeError):
     """Raised when an agent run completed without error but produced no
@@ -68,6 +74,36 @@ def _tool_status(message: Any) -> Any:
     return status
 
 
+def _iter_messages(result: Any) -> list[Any]:
+    if isinstance(result, dict):
+        return result.get("messages") or []
+    return getattr(result, "messages", []) or []
+
+
+def _message_content(message: Any) -> str:
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, dict):
+        content = message.get("content")
+    return content if isinstance(content, str) else str(content or "")
+
+
+def _terminal_error_in_result(result: Any) -> bool:
+    """True if the run surfaced a terminal error (case not found/closed) as an
+    error-status ToolMessage rather than a raised exception.
+
+    This is the defensive path for when ToolNode's ``handle_tool_errors`` is
+    set to convert exceptions into error ToolMessages; in the default mode
+    those terminal errors propagate and are caught by the ``except`` instead.
+    """
+    for message in _iter_messages(result):
+        if _tool_status(message) != "error":
+            continue
+        content = _message_content(message)
+        if any(code in content for code in _TERMINAL_ERROR_CODES):
+            return True
+    return False
+
+
 def _brief_was_written(result: Any) -> bool:
     """Scan the agent's returned messages for proof that put_agent_brief ran
     *successfully*.
@@ -78,11 +114,7 @@ def _brief_was_written(result: Any) -> bool:
     the agent requested but that came back with an error status is NOT a
     successful write and does not count.
     """
-    if isinstance(result, dict):
-        messages = result.get("messages") or []
-    else:
-        messages = getattr(result, "messages", []) or []
-    for message in messages:
+    for message in _iter_messages(result):
         if _tool_name(message) != _PUT_AGENT_BRIEF_TOOL:
             continue
         if _tool_status(message) == "error":
@@ -189,6 +221,16 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
             case_id,
         )
         raise
+
+    if _terminal_error_in_result(result):
+        # A terminal error (case not found/closed) surfaced as an error-status
+        # ToolMessage instead of propagating. The case can never succeed, so
+        # commit rather than redeliver.
+        logger.info(
+            "Terminal error surfaced as ToolMessage for caseId=%s; not retrying.",
+            case_id,
+        )
+        return HandleResult.SKIPPED_TERMINAL
 
     if not _brief_was_written(result):
         # The run finished without raising but never wrote the brief. Do NOT
