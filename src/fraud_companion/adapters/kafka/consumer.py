@@ -155,7 +155,22 @@ class OutboxConsumer:
                 logger.error("Kafka consumer error: %s", err)
                 continue
 
-            self.process_message(msg)
+            try:
+                self.process_message(msg)
+            except Exception:
+                # Isolate per-message failures so one bad/retryable message can
+                # never crash the poll loop (which would take the whole consumer
+                # down and redeliver-crash on restart). The offset is NOT
+                # committed here, so Kafka redelivers — at-least-once, safe
+                # because processing is idempotent. Terminal/malformed outcomes
+                # are already committed inside process_message and never reach
+                # this handler.
+                logger.exception(
+                    "Unhandled error processing message (key=%r); left "
+                    "uncommitted for redelivery.",
+                    msg.key(),
+                )
+                continue
 
     def close(self) -> None:
         self._consumer.close()

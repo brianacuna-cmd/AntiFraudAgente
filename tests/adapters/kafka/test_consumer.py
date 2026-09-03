@@ -179,6 +179,44 @@ def test_retryable_error_from_handler_does_not_commit(mock_consumer_cls, setting
     mock_consumer.commit.assert_not_called()
 
 
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_run_survives_per_message_exception_and_keeps_polling(
+    mock_consumer_cls, settings, fake_agent
+):
+    # A single failing message must NOT crash the whole poll loop (which would
+    # take the entire consumer down and, on restart, redeliver and crash again
+    # forever). run() must isolate per-message failures and keep polling.
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    bad = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+    )
+    good = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope("case-ok")).encode("utf-8"),
+    )
+    mock_consumer.poll.side_effect = [bad, good]
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 2  # allow exactly two iterations
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=[RuntimeError("boom"), HandleResult.PROCESSED],
+    ):
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent)
+        # Must not raise despite the first message failing.
+        consumer.run(should_stop=stop, poll_timeout=0)
+
+    # Second (good) message still processed and committed after the first failed.
+    mock_consumer.commit.assert_called_once_with(good)
+
+
 @pytest.mark.parametrize("result", [HandleResult.PROCESSED, HandleResult.SKIPPED_TERMINAL])
 @patch("fraud_companion.adapters.kafka.consumer.Consumer")
 def test_processed_or_skipped_terminal_commits(mock_consumer_cls, settings, fake_agent, result):
