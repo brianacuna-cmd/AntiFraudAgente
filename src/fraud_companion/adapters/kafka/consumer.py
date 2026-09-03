@@ -92,6 +92,27 @@ class OutboxConsumer:
             self._consumer.commit(msg)
             return
 
+        configured_org_id = self._settings.kafka_organization_id
+        if not configured_org_id:
+            logger.warning(
+                "kafka_organization_id is not configured; refusing to process "
+                "case.created message (key=%r) to avoid cross-tenant processing.",
+                msg.key(),
+            )
+            self._consumer.commit(msg)
+            return
+
+        if organization_id != configured_org_id:
+            logger.info(
+                "Skipping case.created message (key=%r) with non-matching "
+                "organization_id=%r (expected %r).",
+                msg.key(),
+                organization_id,
+                configured_org_id,
+            )
+            self._consumer.commit(msg)
+            return
+
         try:
             envelope = json.loads(msg.value())
         except (json.JSONDecodeError, TypeError, ValueError):

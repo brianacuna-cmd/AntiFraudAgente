@@ -224,6 +224,106 @@ def test_malformed_json_value_on_case_created_is_logged_and_committed(
 
 
 @patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_non_matching_organization_id_skips_handler_but_commits(
+    mock_consumer_cls, settings, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    envelope = _case_created_envelope()
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-2")],
+        value=json.dumps(envelope).encode("utf-8"),
+    )
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created"
+    ) as mock_handle:
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent)
+        consumer.process_message(msg)
+
+    mock_handle.assert_not_called()
+    mock_consumer.commit.assert_called_once_with(msg)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_matching_organization_id_processes_as_before(mock_consumer_cls, settings, fake_agent):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    envelope = _case_created_envelope()
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(envelope).encode("utf-8"),
+    )
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        return_value=HandleResult.PROCESSED,
+    ) as mock_handle:
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent)
+        consumer.process_message(msg)
+
+    mock_handle.assert_called_once_with(envelope, fake_agent)
+    mock_consumer.commit.assert_called_once_with(msg)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_missing_organization_id_header_on_case_created_skips_and_commits(
+    mock_consumer_cls, settings, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    envelope = _case_created_envelope()
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created")],
+        value=json.dumps(envelope).encode("utf-8"),
+    )
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created"
+    ) as mock_handle:
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent)
+        consumer.process_message(msg)
+
+    mock_handle.assert_not_called()
+    mock_consumer.commit.assert_called_once_with(msg)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_unset_kafka_organization_id_config_skips_and_commits_even_on_match(
+    mock_consumer_cls, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    unconfigured_settings = Settings(
+        anti_fraud_base_url="https://api.example.com",
+        anti_fraud_agent_api_key="agent-key",
+        google_api_key="google-key",
+        kafka_bootstrap_servers="localhost:9092",
+        kafka_group_id="fraud-companion",
+        kafka_organization_id="",
+    )
+
+    envelope = _case_created_envelope()
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(envelope).encode("utf-8"),
+    )
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created"
+    ) as mock_handle:
+        consumer = OutboxConsumer(settings=unconfigured_settings, agent=fake_agent)
+        consumer.process_message(msg)
+
+    mock_handle.assert_not_called()
+    mock_consumer.commit.assert_called_once_with(msg)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
 def test_enable_auto_commit_is_configured_false(mock_consumer_cls, settings, fake_agent):
     OutboxConsumer(settings=settings, agent=fake_agent)
 
