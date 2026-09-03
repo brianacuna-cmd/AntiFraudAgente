@@ -7,4 +7,17 @@ venv/
 env/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 *.egg-info/
+build/
+dist/
+
+# Local tooling / SDD metadata (not part of the deliverable)
+.atl/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
+*.swp
