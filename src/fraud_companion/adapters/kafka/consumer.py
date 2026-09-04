@@ -28,11 +28,16 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 from typing import Any
 
 from confluent_kafka import Consumer, KafkaError, Message, TopicPartition
 
+from fraud_companion.application.agent_port import (
+    AgentRateLimitedError,
+    AgentUnavailableError,
+)
 from fraud_companion.application.case_created_handler import handle_case_created
 from fraud_companion.config import Settings
 from fraud_companion.domain.events import CASE_CREATED_EVENT
@@ -41,6 +46,22 @@ logger = logging.getLogger(__name__)
 
 _EVENT_TYPE_HEADER = "event_type"
 _ORGANIZATION_ID_HEADER = "organization_id"
+
+#: Provider backpressure (rate-limit / unavailable) is transient but can last
+#: minutes. These bound the wait so a single retry never sleeps unboundedly.
+_BACKPRESSURE_MAX_SECONDS = 60.0
+_BACKPRESSURE_JITTER_FRACTION = 0.1
+#: Upper bound on consecutive backpressure retries for one offset. Generous
+#: (with the 60s cap this spans well over an hour) so genuinely transient
+#: provider outages ride through, but bounded so a MISLABELLED-transient
+#: condition (revoked key, permanently exhausted quota, sustained outage) is
+#: escalated loudly instead of stalling the partition forever.
+_BACKPRESSURE_MAX_ATTEMPTS = 20
+
+#: Errors signalling the LLM provider is applying backpressure — retried on a
+#: separate, patient path that never counts against the permanent-failure
+#: budget (so a transient outage cannot crash the service or drop a case).
+_PROVIDER_BACKPRESSURE_ERRORS = (AgentRateLimitedError, AgentUnavailableError)
 
 
 def _decode_headers(headers: list[tuple[str, bytes]] | None) -> dict[str, str]:
@@ -80,6 +101,7 @@ class OutboxConsumer:
         # retries of a message that keeps failing so a mis-classified permanent
         # error cannot redeliver forever.
         self._delivery_attempts: dict[tuple[str, int, int], int] = {}
+        self._backpressure_attempts: dict[tuple[str, int, int], int] = {}
 
     def process_message(self, msg: Message) -> None:
         """Handle a single already-polled, error-free Kafka message.
@@ -169,12 +191,79 @@ class OutboxConsumer:
             key = (msg.topic(), msg.partition(), msg.offset())
             try:
                 self.process_message(msg)
+            except _PROVIDER_BACKPRESSURE_ERRORS as exc:
+                self._on_provider_backpressure(msg, key, exc)
+                continue
             except Exception:
                 self._on_process_failure(msg, key)
                 continue
             else:
                 # Success: clear any retry bookkeeping for this offset.
                 self._delivery_attempts.pop(key, None)
+                self._backpressure_attempts.pop(key, None)
+
+    def _on_provider_backpressure(
+        self, msg: Message, key: tuple[str, int, int], exc: Exception
+    ) -> None:
+        """Handle transient LLM-provider backpressure (rate-limit / unavailable).
+
+        Unlike a per-message processing failure, this is NOT the message's
+        fault and can outlast the small per-message retry budget. Counting it
+        against ``kafka_max_delivery_attempts`` would crash or drop the case
+        within seconds of a provider outage. Instead we pause the partition,
+        wait — honouring the provider's ``retry_after`` when supplied, else
+        exponential backoff with jitter capped at ``_BACKPRESSURE_MAX_SECONDS``
+        — seek back, and resume. The offset is never committed, so a transient
+        outage costs latency, never a lost case.
+        """
+        topic, partition, offset = key
+        attempts = self._backpressure_attempts.get(key, 0) + 1
+        self._backpressure_attempts[key] = attempts
+
+        if attempts > _BACKPRESSURE_MAX_ATTEMPTS:
+            # A "transient" condition that never clears is not transient. Stop
+            # stalling this partition silently: drop the bookkeeping and
+            # escalate loudly. The offset is still uncommitted, so on restart
+            # the case is reprocessed — nothing is lost, but the failure is now
+            # operator-visible instead of an endless WARNING loop.
+            self._backpressure_attempts.pop(key, None)
+            logger.critical(
+                "LLM provider backpressure (%s) on key=%r UNRESOLVED after %d "
+                "attempts (%s[%d]@%d); escalating as a non-transient failure.",
+                type(exc).__name__, msg.key(), _BACKPRESSURE_MAX_ATTEMPTS,
+                topic, partition, offset,
+            )
+            raise exc
+
+        delay = self._backpressure_delay(exc, attempts)
+
+        logger.warning(
+            "LLM provider backpressure (%s) on key=%r; pausing %s[%d] and "
+            "retrying offset %d in %.1fs (backpressure attempt %d).",
+            type(exc).__name__, msg.key(), topic, partition, offset, delay, attempts,
+        )
+
+        affected = TopicPartition(topic, partition)
+        self._consumer.pause([affected])
+        self._consumer.seek(TopicPartition(topic, partition, offset))
+        time.sleep(delay)
+        self._consumer.resume([affected])
+
+    def _backpressure_delay(self, exc: Exception, attempts: int) -> float:
+        """Seconds to wait before retrying under provider backpressure.
+
+        Honours a positive ``retry_after`` hint when present; otherwise uses
+        exponential backoff off ``kafka_retry_backoff_seconds``. The result is
+        capped, then a small random jitter is added to avoid a thundering herd
+        of consumers retrying in lock-step.
+        """
+        retry_after = getattr(exc, "retry_after", None)
+        if isinstance(retry_after, (int, float)) and retry_after > 0:
+            base = float(retry_after)
+        else:
+            base = self._settings.kafka_retry_backoff_seconds * (2 ** (attempts - 1))
+        base = min(base, _BACKPRESSURE_MAX_SECONDS)
+        return base + random.uniform(0, base * _BACKPRESSURE_JITTER_FRACTION)
 
     def _on_process_failure(self, msg: Message, key: tuple[str, int, int]) -> None:
         """Handle a per-message processing failure without advancing past it.

@@ -462,3 +462,159 @@ def test_subscribes_to_configured_outbox_topic(mock_consumer_cls, settings, fake
     OutboxConsumer(settings=settings, agent=fake_agent)
 
     mock_consumer.subscribe.assert_called_once_with(["outbox.events"])
+
+
+# --- LLM provider backpressure (rate-limit / unavailable) — approach B -------
+
+from fraud_companion.application.agent_port import (  # noqa: E402
+    AgentRateLimitedError,
+    AgentUnavailableError,
+)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_rate_limited_pauses_seeks_honors_retry_after_and_resumes_without_commit(
+    mock_consumer_cls, _mock_uniform, mock_sleep, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        topic="outbox.events",
+        partition=2,
+        offset=7,
+    )
+    mock_consumer.poll.return_value = msg
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 1
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentRateLimitedError("429", retry_after=5.0),
+    ):
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent)
+        consumer.run(should_stop=stop, poll_timeout=0)  # must not raise
+
+    # Paused and resumed the affected partition.
+    paused = mock_consumer.pause.call_args.args[0]
+    assert (paused[0].topic, paused[0].partition) == ("outbox.events", 2)
+    mock_consumer.resume.assert_called()
+    # Sought back to the exact offset.
+    tp = mock_consumer.seek.call_args.args[0]
+    assert (tp.topic, tp.partition, tp.offset) == ("outbox.events", 2, 7)
+    # Waited the provider-suggested retry_after (jitter patched to 0).
+    mock_sleep.assert_called_once_with(5.0)
+    # Backpressure is not the message's fault: never committed => no data loss.
+    mock_consumer.commit.assert_not_called()
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_unavailable_uses_exponential_backoff_when_no_retry_after(
+    mock_consumer_cls, _mock_uniform, mock_sleep, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=3,
+    )
+    mock_consumer.poll.return_value = msg
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 2  # two backpressure iterations
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentUnavailableError("503"),
+    ):
+        consumer = OutboxConsumer(
+            settings=_retry_settings(kafka_retry_backoff_seconds=2.0),
+            agent=fake_agent,
+        )
+        consumer.run(should_stop=stop, poll_timeout=0)
+
+    # base * 2^(attempt-1): 2 then 4 (jitter patched to 0).
+    assert [c.args[0] for c in mock_sleep.call_args_list] == [2.0, 4.0]
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_provider_backpressure_does_not_crash_or_skip_on_exhausted_budget(
+    mock_consumer_cls, _mock_uniform, _mock_sleep, fake_agent
+):
+    # Even with a tiny permanent-failure budget, provider backpressure must NOT
+    # trip crash/skip: it is transient and the case must survive.
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=1,
+    )
+    mock_consumer.poll.return_value = msg
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 5  # many iterations, well past max_delivery_attempts
+
+    settings = _retry_settings(kafka_max_delivery_attempts=2, kafka_on_exhausted="crash")
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentRateLimitedError("429"),
+    ):
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent)
+        consumer.run(should_stop=stop, poll_timeout=0)  # must NOT raise
+
+    mock_consumer.commit.assert_not_called()  # no skip => no data loss
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer._BACKPRESSURE_MAX_ATTEMPTS", 3)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_persistent_backpressure_escalates_loudly_after_cap_without_commit(
+    mock_consumer_cls, _mock_uniform, _mock_sleep, fake_agent, caplog
+):
+    # A mislabelled-transient (permanent) 429/5xx must NOT retry forever: once
+    # the backpressure cap is exceeded it escalates (crashes) with a CRITICAL
+    # log, and still never commits (no data loss — reprocessed on restart).
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=4,
+    )
+    mock_consumer.poll.return_value = msg
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentRateLimitedError("permanent 429"),
+    ):
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent)
+        with caplog.at_level("CRITICAL"):
+            with pytest.raises(AgentRateLimitedError):
+                consumer.run(should_stop=lambda: False, poll_timeout=0)
+
+    assert "UNRESOLVED" in caplog.text
+    mock_consumer.commit.assert_not_called()

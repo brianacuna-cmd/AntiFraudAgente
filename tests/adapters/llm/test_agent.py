@@ -11,8 +11,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from google.genai.errors import APIError
+
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
-from fraud_companion.adapters.llm.agent import build_agent
+from fraud_companion.adapters.llm.agent import GeminiAgent, build_agent
+from fraud_companion.application.agent_port import (
+    AgentRateLimitedError,
+    AgentUnavailableError,
+)
 from fraud_companion.config import Settings
 from fraud_companion.domain.policy import SECURITY_SYSTEM_PROMPT
 from fraud_companion.domain.tools_spec import ALLOWED_TOOLS, DisallowedToolError
@@ -117,13 +123,65 @@ class TestBuildAgent:
         with pytest.raises(DisallowedToolError):
             middleware.wrap_tool_call(request, _execute_must_not_be_called)
 
-    def test_returns_the_compiled_agent_from_create_agent(
+    def test_returns_a_gemini_agent_wrapping_the_compiled_agent(
         self, settings: Settings, http_client: MagicMock
     ) -> None:
+        compiled = MagicMock()
+        compiled.invoke.return_value = "compiled-result"
         with patch("fraud_companion.adapters.llm.agent.ChatGoogleGenerativeAI"), patch(
             "fraud_companion.adapters.llm.agent.create_agent"
         ) as mock_create_agent:
-            mock_create_agent.return_value = "compiled-agent-sentinel"
+            mock_create_agent.return_value = compiled
             result = build_agent(settings, http_client)
 
-        assert result == "compiled-agent-sentinel"
+        assert isinstance(result, GeminiAgent)
+        # The wrapper delegates invoke to the compiled agent unchanged.
+        assert result.invoke({"messages": []}) == "compiled-result"
+
+
+class TestGeminiAgentErrorTranslation:
+    """The adapter is the ONLY place that knows about google.genai errors;
+    it maps them onto the provider-agnostic agent-port taxonomy."""
+
+    def test_delegates_invoke_on_success(self) -> None:
+        compiled = MagicMock()
+        compiled.invoke.return_value = {"messages": ["ok"]}
+        assert GeminiAgent(compiled).invoke({"x": 1}) == {"messages": ["ok"]}
+
+    def test_translates_429_to_rate_limited(self) -> None:
+        compiled = MagicMock()
+        compiled.invoke.side_effect = APIError(429, {})
+        with pytest.raises(AgentRateLimitedError):
+            GeminiAgent(compiled).invoke({})
+
+    def test_translates_503_to_unavailable(self) -> None:
+        compiled = MagicMock()
+        compiled.invoke.side_effect = APIError(503, {"error": {"status": "UNAVAILABLE"}})
+        with pytest.raises(AgentUnavailableError):
+            GeminiAgent(compiled).invoke({})
+
+    def test_extracts_retry_after_from_429_retry_info(self) -> None:
+        compiled = MagicMock()
+        compiled.invoke.side_effect = APIError(
+            429,
+            {
+                "error": {
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                            "retryDelay": "17s",
+                        }
+                    ],
+                }
+            },
+        )
+        with pytest.raises(AgentRateLimitedError) as exc_info:
+            GeminiAgent(compiled).invoke({})
+        assert exc_info.value.retry_after == 17.0
+
+    def test_non_backpressure_api_error_propagates_unchanged(self) -> None:
+        compiled = MagicMock()
+        compiled.invoke.side_effect = APIError(400, {})
+        with pytest.raises(APIError):
+            GeminiAgent(compiled).invoke({})

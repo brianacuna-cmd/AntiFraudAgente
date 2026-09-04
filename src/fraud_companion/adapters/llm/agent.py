@@ -25,11 +25,19 @@ installed packages before writing this module:
 """
 from __future__ import annotations
 
+import re
+from typing import Any
+
+from google.genai.errors import APIError
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_tool_call as _as_wrap_tool_call_middleware
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
+from fraud_companion.application.agent_port import (
+    AgentRateLimitedError,
+    AgentUnavailableError,
+)
 from fraud_companion.adapters.llm.guardrail import build_tool_guardrail
 from fraud_companion.adapters.llm.tools import (
     build_get_analysis_pack_tool,
@@ -41,7 +49,66 @@ from fraud_companion.config import Settings
 from fraud_companion.domain.policy import SECURITY_SYSTEM_PROMPT
 
 
-def build_agent(settings: Settings, http_client: AntiFraudHttpClient):
+_RETRY_DELAY_RE = re.compile(r"(?P<seconds>\d+(?:\.\d+)?)s")
+
+
+def _extract_retry_after(exc: APIError) -> float | None:
+    """Best-effort parse of a Gemini 429 ``RetryInfo.retryDelay`` (e.g. "17s").
+
+    Never raises: any unexpected shape yields ``None`` so the caller falls
+    back to its own backoff.
+    """
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        details = details.get("error", details)
+    entries = details.get("details") if isinstance(details, dict) else None
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        delay = entry.get("retryDelay")
+        if isinstance(delay, str):
+            match = _RETRY_DELAY_RE.fullmatch(delay.strip())
+            if match:
+                return float(match.group("seconds"))
+    return None
+
+
+def _translate_api_error(exc: APIError) -> Exception:
+    """Map a google.genai ``APIError`` onto the provider-agnostic taxonomy.
+
+    Only backpressure classes are translated; anything else is returned
+    unchanged so it propagates as-is.
+    """
+    code = getattr(exc, "code", None)
+    if code == 429:
+        return AgentRateLimitedError(str(exc), retry_after=_extract_retry_after(exc))
+    if isinstance(code, int) and 500 <= code < 600:
+        return AgentUnavailableError(str(exc))
+    return exc
+
+
+class GeminiAgent:
+    """Adapter wrapping the compiled LangGraph agent.
+
+    Its ONLY job beyond delegation is to translate ``google.genai`` API
+    errors into the provider-agnostic :mod:`agent_port` taxonomy, so the
+    handler and consumer never import a provider SDK. Satisfies
+    ``application.agent_port.CaseAnalystAgent``.
+    """
+
+    def __init__(self, compiled: Any) -> None:
+        self._compiled = compiled
+
+    def invoke(self, payload: dict[str, Any]) -> Any:
+        try:
+            return self._compiled.invoke(payload)
+        except APIError as exc:
+            raise _translate_api_error(exc) from exc
+
+
+def build_agent(settings: Settings, http_client: AntiFraudHttpClient) -> GeminiAgent:
     """Build the compiled Gemini agent graph.
 
     Wires the 4 allow-listed tools bound to ``http_client``, the tool
@@ -66,9 +133,10 @@ def build_agent(settings: Settings, http_client: AntiFraudHttpClient):
 
     guardrail_middleware = _as_wrap_tool_call_middleware(build_tool_guardrail())
 
-    return create_agent(
+    compiled = create_agent(
         model=model,
         tools=tools,
         system_prompt=SECURITY_SYSTEM_PROMPT,
         middleware=[guardrail_middleware],
     )
+    return GeminiAgent(compiled)
