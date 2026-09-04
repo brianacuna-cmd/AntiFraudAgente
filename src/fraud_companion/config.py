@@ -9,6 +9,10 @@ from dataclasses import dataclass, field
 
 DEFAULT_KAFKA_OUTBOX_TOPIC = "outbox.events"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+#: Low temperature: the brief must be factual and reproducible, never creative.
+DEFAULT_GEMINI_TEMPERATURE = 0.2
+#: Caps the brief length so output-token cost stays bounded per case.
+DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 800
 DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS = 5
 DEFAULT_KAFKA_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_KAFKA_ON_EXHAUSTED = "crash"
@@ -53,6 +57,18 @@ def _parse_non_negative_float(raw: str | None, default: float, var_name: str) ->
     return value
 
 
+def _parse_temperature(raw: str | None, default: float, var_name: str) -> float:
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{var_name} must be a number, got {raw!r}") from exc
+    if not 0.0 <= value <= 2.0:
+        raise ValueError(f"{var_name} must be between 0 and 2, got {value}")
+    return value
+
+
 def _parse_on_exhausted(raw: str) -> str:
     if raw not in _ON_EXHAUSTED_CHOICES:
         choices = ", ".join(sorted(_ON_EXHAUSTED_CHOICES))
@@ -82,6 +98,10 @@ class Settings:
     kafka_organization_id: str
     kafka_outbox_topic: str = field(default=DEFAULT_KAFKA_OUTBOX_TOPIC)
     gemini_model: str = field(default=DEFAULT_GEMINI_MODEL)
+    gemini_temperature: float = field(default=DEFAULT_GEMINI_TEMPERATURE)
+    gemini_max_output_tokens: int = field(
+        default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS
+    )
     kafka_max_delivery_attempts: int = field(
         default=DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS
     )
@@ -112,6 +132,16 @@ class Settings:
                 "KAFKA_OUTBOX_TOPIC", DEFAULT_KAFKA_OUTBOX_TOPIC
             ),
             gemini_model=source.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
+            gemini_temperature=_parse_temperature(
+                source.get("GEMINI_TEMPERATURE"),
+                DEFAULT_GEMINI_TEMPERATURE,
+                "GEMINI_TEMPERATURE",
+            ),
+            gemini_max_output_tokens=_parse_positive_int(
+                source.get("GEMINI_MAX_OUTPUT_TOKENS"),
+                DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
+                "GEMINI_MAX_OUTPUT_TOKENS",
+            ),
             kafka_max_delivery_attempts=_parse_positive_int(
                 source.get("KAFKA_MAX_DELIVERY_ATTEMPTS"),
                 DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS,

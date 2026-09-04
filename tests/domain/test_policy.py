@@ -33,3 +33,15 @@ class TestSecuritySystemPrompt:
 
     def test_states_case_stays_open(self) -> None:
         assert "open" in SECURITY_SYSTEM_PROMPT.lower()
+
+    def test_frames_brief_as_a_justification_not_a_data_dump(self) -> None:
+        lowered = SECURITY_SYSTEM_PROMPT.lower()
+        # The brief must read as WHY the case was opened, not a raw listing.
+        assert "why" in lowered
+        assert "justif" in lowered or "reason" in lowered
+
+    def test_requires_a_structured_brief(self) -> None:
+        lowered = SECURITY_SYSTEM_PROMPT.lower()
+        # Structure: dominant reason, supporting evidence, analyst focus.
+        assert "evidence" in lowered
+        assert "analyst" in lowered

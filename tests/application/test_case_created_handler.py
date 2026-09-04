@@ -72,6 +72,63 @@ class _FakeAgent:
         return {"messages": messages}
 
 
+class _UsageMessage:
+    """Stand-in for an AIMessage carrying token usage_metadata."""
+
+    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+        self.usage_metadata = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+
+
+def test_handle_case_created_logs_token_usage(caplog) -> None:
+    class _UsageAgent(_FakeAgent):
+        def invoke(self, input_: dict) -> dict:
+            self.invocations.append(input_)
+            return {
+                "messages": [
+                    _UsageMessage(1000, 200),
+                    _UsageMessage(500, 100),
+                    _ToolMessage("put_agent_brief"),
+                ]
+            }
+
+    agent = _UsageAgent()
+
+    with caplog.at_level("INFO"):
+        result = handle_case_created(_envelope(), agent)
+
+    assert result is HandleResult.PROCESSED
+    logged = caplog.text
+    # Aggregated across both AIMessages: input=1500, output=300, total=1800.
+    assert "1500" in logged
+    assert "300" in logged
+    assert "1800" in logged
+
+
+def test_handle_case_created_survives_non_numeric_token_usage() -> None:
+    """A bad usage_metadata value must never turn a successful case into a
+    crash: token accounting is observability, not correctness."""
+
+    class _BadUsageMessage:
+        usage_metadata = {"input_tokens": "not-a-number", "output_tokens": None}
+
+    class _BadUsageAgent(_FakeAgent):
+        def invoke(self, input_: dict) -> dict:
+            self.invocations.append(input_)
+            return {
+                "messages": [_BadUsageMessage(), _ToolMessage("put_agent_brief")]
+            }
+
+    agent = _BadUsageAgent()
+
+    result = handle_case_created(_envelope(), agent)
+
+    assert result is HandleResult.PROCESSED
+
+
 def test_handle_case_created_invokes_agent_once_with_case_id() -> None:
     agent = _FakeAgent()
 

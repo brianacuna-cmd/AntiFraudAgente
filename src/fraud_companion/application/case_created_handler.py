@@ -87,6 +87,39 @@ def _message_content(message: Any) -> str:
     return content if isinstance(content, str) else str(content or "")
 
 
+def _sum_token_usage(result: Any) -> dict[str, int]:
+    """Aggregate ``usage_metadata`` across all AIMessages in the agent result.
+
+    LangChain chat models attach ``usage_metadata`` (``input_tokens`` /
+    ``output_tokens`` / ``total_tokens``) to each AIMessage. Summing them gives
+    the per-case token cost so consumption can be observed and tuned. Messages
+    without usage metadata (tool/human messages) contribute nothing.
+    """
+    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    for message in _iter_messages(result):
+        usage = getattr(message, "usage_metadata", None)
+        if usage is None and isinstance(message, dict):
+            usage = message.get("usage_metadata")
+        if not isinstance(usage, dict):
+            continue
+        for key in totals:
+            totals[key] += _coerce_token_count(usage.get(key))
+    return totals
+
+
+def _coerce_token_count(value: Any) -> int:
+    """Best-effort int coercion for a token count; never raises.
+
+    Provider/version variance can put a non-int-coercible value in
+    ``usage_metadata``. Token accounting is observability, not correctness,
+    so a bad value contributes 0 rather than crashing a successful case.
+    """
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _terminal_error_in_result(result: Any) -> bool:
     """True if the run surfaced a terminal error (case not found/closed) as an
     error-status ToolMessage rather than a raised exception.
@@ -221,6 +254,20 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
             case_id,
         )
         raise
+
+    try:
+        usage = _sum_token_usage(result)
+        logger.info(
+            "Token usage for caseId=%s: input=%d output=%d total=%d",
+            case_id,
+            usage["input_tokens"],
+            usage["output_tokens"],
+            usage["total_tokens"],
+        )
+    except Exception:  # noqa: BLE001 - usage logging must never fail the case
+        logger.warning(
+            "Failed to compute token usage for caseId=%s; continuing.", case_id
+        )
 
     if _terminal_error_in_result(result):
         # A terminal error (case not found/closed) surfaced as an error-status

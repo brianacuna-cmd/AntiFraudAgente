@@ -47,6 +47,16 @@ class TestBuildAgent:
         assert kwargs["model"] == settings.gemini_model
         assert kwargs["google_api_key"] == settings.google_api_key
 
+    def test_passes_temperature_and_max_output_tokens_from_settings(
+        self, settings: Settings, http_client: MagicMock
+    ) -> None:
+        with patch("fraud_companion.adapters.llm.agent.ChatGoogleGenerativeAI") as mock_model_cls:
+            build_agent(settings, http_client)
+
+        _, kwargs = mock_model_cls.call_args
+        assert kwargs["temperature"] == settings.gemini_temperature
+        assert kwargs["max_output_tokens"] == settings.gemini_max_output_tokens
+
     def test_api_key_value_never_appears_in_stdout_or_stderr(
         self, settings: Settings, http_client: MagicMock, capsys: pytest.CaptureFixture[str]
     ) -> None:

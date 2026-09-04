@@ -37,6 +37,45 @@ def test_loads_all_required_settings_from_env(monkeypatch):
     assert settings.kafka_organization_id == "org-123"
 
 
+def test_gemini_temperature_defaults_to_low_value(monkeypatch):
+    _set_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.gemini_temperature == 0.2
+
+
+def test_gemini_temperature_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"GEMINI_TEMPERATURE": "0.7"})
+
+    settings = Settings.from_env()
+
+    assert settings.gemini_temperature == 0.7
+
+
+def test_gemini_temperature_rejects_out_of_range(monkeypatch):
+    _set_env(monkeypatch, overrides={"GEMINI_TEMPERATURE": "3"})
+
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_gemini_max_output_tokens_defaults(monkeypatch):
+    _set_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.gemini_max_output_tokens == 800
+
+
+def test_gemini_max_output_tokens_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"GEMINI_MAX_OUTPUT_TOKENS": "1200"})
+
+    settings = Settings.from_env()
+
+    assert settings.gemini_max_output_tokens == 1200
+
+
 def test_kafka_outbox_topic_defaults_to_outbox_events(monkeypatch):
     _set_env(monkeypatch)
 

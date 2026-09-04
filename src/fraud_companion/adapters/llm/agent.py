@@ -53,6 +53,8 @@ def build_agent(settings: Settings, http_client: AntiFraudHttpClient):
     model = ChatGoogleGenerativeAI(
         model=settings.gemini_model,
         google_api_key=settings.google_api_key,
+        temperature=settings.gemini_temperature,
+        max_output_tokens=settings.gemini_max_output_tokens,
     )
 
     tools = [
