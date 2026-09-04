@@ -13,6 +13,9 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_GEMINI_TEMPERATURE = 0.2
 #: Caps the brief length so output-token cost stays bounded per case.
 DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 800
+#: Per-request HTTP timeout (seconds) for the anti-fraud API client. Prevents
+#: a slow/hung upstream from blocking the consumer poll thread indefinitely.
+DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
 DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS = 5
 DEFAULT_KAFKA_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_KAFKA_ON_EXHAUSTED = "crash"
@@ -54,6 +57,18 @@ def _parse_non_negative_float(raw: str | None, default: float, var_name: str) ->
         raise ValueError(f"{var_name} must be a number, got {raw!r}") from exc
     if value < 0:
         raise ValueError(f"{var_name} must be >= 0, got {value}")
+    return value
+
+
+def _parse_positive_float(raw: str | None, default: float, var_name: str) -> float:
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{var_name} must be a number, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{var_name} must be > 0, got {value}")
     return value
 
 
@@ -102,6 +117,7 @@ class Settings:
     gemini_max_output_tokens: int = field(
         default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS
     )
+    http_timeout_seconds: float = field(default=DEFAULT_HTTP_TIMEOUT_SECONDS)
     kafka_max_delivery_attempts: int = field(
         default=DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS
     )
@@ -141,6 +157,11 @@ class Settings:
                 source.get("GEMINI_MAX_OUTPUT_TOKENS"),
                 DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
                 "GEMINI_MAX_OUTPUT_TOKENS",
+            ),
+            http_timeout_seconds=_parse_positive_float(
+                source.get("HTTP_TIMEOUT_SECONDS"),
+                DEFAULT_HTTP_TIMEOUT_SECONDS,
+                "HTTP_TIMEOUT_SECONDS",
             ),
             kafka_max_delivery_attempts=_parse_positive_int(
                 source.get("KAFKA_MAX_DELIVERY_ATTEMPTS"),

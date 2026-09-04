@@ -1,6 +1,8 @@
 """Tests for the shared synchronous anti-fraud HTTP client."""
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import httpx
 import pytest
 import respx
@@ -37,6 +39,37 @@ def test_get_sends_api_key_header_and_no_authorization(client: AntiFraudHttpClie
     sent = route.calls.last.request
     assert sent.headers["X-Agent-Api-Key"] == API_KEY
     assert "Authorization" not in sent.headers
+
+
+def test_get_forwards_configured_timeout_to_httpx():
+    client = AntiFraudHttpClient(base_url=BASE_URL, api_key=API_KEY, timeout=12.5)
+    with patch("fraud_companion.adapters.http.client.httpx.get") as mock_get:
+        mock_get.return_value = httpx.Response(200, json={})
+        client.get("/cases/1")
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["timeout"] == 12.5
+
+
+def test_put_forwards_configured_timeout_to_httpx():
+    client = AntiFraudHttpClient(base_url=BASE_URL, api_key=API_KEY, timeout=8.0)
+    with patch("fraud_companion.adapters.http.client.httpx.put") as mock_put:
+        mock_put.return_value = httpx.Response(200, json={})
+        client.put("/cases/1/brief", json_body={"brief": "x"})
+
+    _, kwargs = mock_put.call_args
+    assert kwargs["timeout"] == 8.0
+
+
+def test_get_uses_a_default_timeout_when_unspecified():
+    client = AntiFraudHttpClient(base_url=BASE_URL, api_key=API_KEY)
+    with patch("fraud_companion.adapters.http.client.httpx.get") as mock_get:
+        mock_get.return_value = httpx.Response(200, json={})
+        client.get("/cases/1")
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["timeout"] is not None
+    assert kwargs["timeout"] > 0
 
 
 @respx.mock

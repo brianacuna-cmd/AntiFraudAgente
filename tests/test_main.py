@@ -42,7 +42,9 @@ class TestMain:
 
             mock_from_env.assert_called_once()
             mock_client_cls.assert_called_once_with(
-                settings.anti_fraud_base_url, settings.anti_fraud_agent_api_key
+                settings.anti_fraud_base_url,
+                settings.anti_fraud_agent_api_key,
+                timeout=settings.http_timeout_seconds,
             )
             mock_build_agent.assert_called_once_with(settings, mock_client_cls.return_value)
             mock_consumer_cls.assert_called_once_with(

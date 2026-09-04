@@ -37,6 +37,29 @@ def test_loads_all_required_settings_from_env(monkeypatch):
     assert settings.kafka_organization_id == "org-123"
 
 
+def test_http_timeout_defaults(monkeypatch):
+    _set_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.http_timeout_seconds == 30.0
+
+
+def test_http_timeout_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"HTTP_TIMEOUT_SECONDS": "12.5"})
+
+    settings = Settings.from_env()
+
+    assert settings.http_timeout_seconds == 12.5
+
+
+def test_http_timeout_rejects_non_positive(monkeypatch):
+    _set_env(monkeypatch, overrides={"HTTP_TIMEOUT_SECONDS": "0"})
+
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
 def test_gemini_temperature_defaults_to_low_value(monkeypatch):
     _set_env(monkeypatch)
 

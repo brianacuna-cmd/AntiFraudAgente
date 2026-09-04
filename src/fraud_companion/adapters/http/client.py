@@ -24,9 +24,16 @@ class AntiFraudHttpClient:
     on PUT requests (there is a JSON body to describe).
     """
 
-    def __init__(self, base_url: str, api_key: str) -> None:
+    #: Fallback timeout (seconds) if none is supplied. Keeps a hung upstream
+    #: from blocking the caller (and the consumer poll thread) forever.
+    DEFAULT_TIMEOUT_SECONDS = 30.0
+
+    def __init__(
+        self, base_url: str, api_key: str, timeout: float | None = None
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT_SECONDS
 
     def _url(self, path: str) -> str:
         if not path.startswith("/"):
@@ -38,13 +45,23 @@ class AntiFraudHttpClient:
         return {"X-Agent-Api-Key": self._api_key}
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        response = httpx.get(self._url(path), headers=self._headers(), params=params)
+        response = httpx.get(
+            self._url(path),
+            headers=self._headers(),
+            params=params,
+            timeout=self._timeout,
+        )
         return self._handle_response(response)
 
     def put(self, path: str, json_body: Any) -> Any:
         headers = self._headers()
         headers["Content-Type"] = "application/json"
-        response = httpx.put(self._url(path), headers=headers, json=json_body)
+        response = httpx.put(
+            self._url(path),
+            headers=headers,
+            json=json_body,
+            timeout=self._timeout,
+        )
         return self._handle_response(response)
 
     @staticmethod

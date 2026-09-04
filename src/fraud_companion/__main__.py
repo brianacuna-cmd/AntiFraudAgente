@@ -87,7 +87,9 @@ def main(
     )
 
     http_client = AntiFraudHttpClient(
-        settings.anti_fraud_base_url, settings.anti_fraud_agent_api_key
+        settings.anti_fraud_base_url,
+        settings.anti_fraud_agent_api_key,
+        timeout=settings.http_timeout_seconds,
     )
     agent = build_agent(settings, http_client)
     consumer = OutboxConsumer(settings=settings, agent=agent)
