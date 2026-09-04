@@ -12,6 +12,7 @@ Tool names MUST match the entries in
 from __future__ import annotations
 
 import functools
+import json
 from typing import Any, Callable
 
 from langchain_core.tools import StructuredTool
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
 from fraud_companion.application.tool_dispatcher import assert_dispatch_allowed
 from fraud_companion.domain.brief import Brief
+from fraud_companion.domain.policy import frame_untrusted_pack
 
 
 def _guard_dispatch(tool_name: str, func: Callable[..., Any]) -> Callable[..., Any]:
@@ -100,8 +102,9 @@ class ListAmlAlertsArgs(BaseModel):
 def build_get_analysis_pack_tool(http_client: AntiFraudHttpClient) -> StructuredTool:
     """Build the read-only ``get_analysis_pack`` StructuredTool."""
 
-    def _get_analysis_pack(case_id: str) -> Any:
-        return http_client.get(f"/cases/{case_id}/analysis-pack")
+    def _get_analysis_pack(case_id: str) -> str:
+        pack = http_client.get(f"/cases/{case_id}/analysis-pack")
+        return frame_untrusted_pack(json.dumps(pack))
 
     return StructuredTool.from_function(
         func=_guard_dispatch("get_analysis_pack", _get_analysis_pack),

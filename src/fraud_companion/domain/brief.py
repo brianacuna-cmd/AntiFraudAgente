@@ -13,6 +13,22 @@ from dataclasses import dataclass
 #: never trips on legitimate output, only on pathological ones.
 MAX_BRIEF_LENGTH = 8000
 
+#: Conservative, deterministic denylist of crude injection *control verb*
+#: phrases. Deliberately narrow: targets literal directive-style control
+#: language, never domain nouns (e.g. "risk score"), so legitimate analyst
+#: prose describing case findings or AML alerts never false-positives.
+_INJECTION_MARKERS = frozenset(
+    {
+        "ignore previous instructions",
+        "ignore all previous",
+        "disregard the above",
+        "new instructions:",
+        "system:",
+        "you are now",
+        "override your instructions",
+    }
+)
+
 
 class BriefValidationError(ValueError):
     """Raised when a brief string fails domain validation."""
@@ -34,4 +50,10 @@ class Brief:
                 f"Brief exceeds the maximum length of {MAX_BRIEF_LENGTH} "
                 f"characters (got {len(trimmed)})"
             )
+        lowered = trimmed.lower()
+        for marker in _INJECTION_MARKERS:
+            if marker in lowered:
+                raise BriefValidationError(
+                    "brief contains a disallowed injection-echo marker"
+                )
         return cls(value=trimmed)
