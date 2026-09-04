@@ -4,6 +4,7 @@ get_analysis_pack is read-only; put_agent_brief is the only write tool.
 """
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ from fraud_companion.adapters.llm.tools import (
     build_put_agent_brief_tool,
 )
 from fraud_companion.domain.brief import BriefValidationError
+from fraud_companion.domain.policy import UNTRUSTED_PACK_CLOSE, UNTRUSTED_PACK_OPEN
 from fraud_companion.domain.tools_spec import ALLOWED_TOOLS, DisallowedToolError
 
 
@@ -30,23 +32,38 @@ class TestGetAnalysisPackTool:
         tool = build_get_analysis_pack_tool(http_client)
         assert tool.name == "get_analysis_pack"
 
-    def test_returns_pack_unchanged(self, http_client: MagicMock) -> None:
+    def test_returns_pack_wrapped_in_untrusted_data_markers(
+        self, http_client: MagicMock
+    ) -> None:
         pack = {
             "case": {"id": "1"},
             "timeline": [],
-            "snapshot": {"hits": [{"points": 10}]},
-            "amlAlerts": [],
+            "snapshot": {
+                "hits": [
+                    {"points": 10, "because": "matched a known mule account"},
+                ]
+            },
+            "amlAlerts": [
+                {"matchedEntry": {"name": "Jane Doe", "document": "AB123"}},
+            ],
             "relatedCases": [],
-            "agentBrief": None,
+            "agentBrief": "existing brief text",
         }
         http_client.get.return_value = pack
 
         tool = build_get_analysis_pack_tool(http_client)
         result = tool.invoke({"case_id": "1"})
 
-        assert result == pack
-        # untouched: no "because" invented, no reshaping
-        assert result["snapshot"]["hits"][0] == {"points": 10}
+        assert isinstance(result, str)
+        assert result.startswith(UNTRUSTED_PACK_OPEN)
+        assert result.endswith(UNTRUSTED_PACK_CLOSE)
+
+        inner = result[len(UNTRUSTED_PACK_OPEN) : -len(UNTRUSTED_PACK_CLOSE)]
+        assert json.loads(inner) == pack
+        # untouched: no "because" invented, no reshaping, values preserved
+        assert "matched a known mule account" in inner
+        assert "Jane Doe" in inner
+        assert "AB123" in inner
         http_client.get.assert_called_once_with("/cases/1/analysis-pack")
 
     def test_404_propagates_case_not_found_error(self, http_client: MagicMock) -> None:
@@ -281,6 +298,53 @@ class TestDispatcherGuardWiredIntoRealTools:
             guarded(case_id="1")
 
         http_client.get.assert_not_called()
+
+
+class TestGuardrailAndPortBoundariesUnchanged:
+    """Task 9: guardrail allow-list/layers and provider-agnostic boundaries
+    are untouched by the untrusted-data framing change."""
+
+    def test_allowed_tools_is_still_exactly_four_tools(self) -> None:
+        assert ALLOWED_TOOLS == {
+            "get_analysis_pack",
+            "put_agent_brief",
+            "list_cases",
+            "list_aml_alerts",
+        }
+
+    def test_guardrail_module_builds_tool_guardrail_for_same_allow_list(self) -> None:
+        from fraud_companion.adapters.llm.guardrail import build_tool_guardrail
+
+        guardrail = build_tool_guardrail()
+        assert guardrail is not None
+
+    def test_tool_dispatcher_still_enforces_allow_list(self) -> None:
+        from fraud_companion.application.tool_dispatcher import assert_dispatch_allowed
+        from fraud_companion.domain.tools_spec import DisallowedToolError
+
+        for name in ALLOWED_TOOLS:
+            assert_dispatch_allowed(name)  # must not raise
+
+        with pytest.raises(DisallowedToolError):
+            assert_dispatch_allowed("resolve_case")
+
+    def test_agent_port_module_has_no_provider_sdk_imports(self) -> None:
+        import ast
+        import inspect
+
+        from fraud_companion.application import agent_port
+
+        source = inspect.getsource(agent_port)
+        tree = ast.parse(source)
+        imported_modules = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.append(node.module)
+
+        for forbidden in ("genai", "google.generativeai", "langchain"):
+            assert not any(forbidden in mod for mod in imported_modules)
 
 
 def test_all_four_tools_names_match_allowed_tools() -> None:
