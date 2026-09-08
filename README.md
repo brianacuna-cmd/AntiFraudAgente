@@ -69,6 +69,7 @@ These are enforced in code, not just documented:
 | `KAFKA_GROUP_ID` | yes | — |
 | `KAFKA_ORGANIZATION_ID` | yes | — |
 | `KAFKA_OUTBOX_TOPIC` | no | `outbox.events` |
+| `LLM_PROVIDER` | no | `gemini` (only registered provider; unknown values raise `UnsupportedProviderError`) |
 | `LLM_MODEL` | no | `gemini-2.5-flash` |
 | `LLM_TEMPERATURE` | no | `0.2` |
 | `LLM_MAX_OUTPUT_TOKENS` | no | `800` |
