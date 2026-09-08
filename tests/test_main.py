@@ -12,10 +12,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fraud_companion import __main__ as entrypoint
+from fraud_companion.adapters.metrics.prometheus_sink import PrometheusMetricsSink
+from fraud_companion.application.metrics_port import NoOpMetricsSink
 from fraud_companion.config import MissingSettingError, Settings
 
 
-def _fake_settings() -> Settings:
+def _fake_settings(*, metrics_enabled: bool = True, metrics_port: int = 9100) -> Settings:
     return Settings(
         anti_fraud_base_url="https://anti-fraud.example.com",
         anti_fraud_agent_api_key="super-secret-agent-key",
@@ -23,6 +25,8 @@ def _fake_settings() -> Settings:
         kafka_bootstrap_servers="localhost:9092",
         kafka_group_id="fraud-companion",
         kafka_organization_id="org-1",
+        metrics_enabled=metrics_enabled,
+        metrics_port=metrics_port,
     )
 
 
@@ -34,6 +38,7 @@ class TestMain:
             patch.object(entrypoint, "AntiFraudHttpClient") as mock_client_cls,
             patch.object(entrypoint, "build_agent") as mock_build_agent,
             patch.object(entrypoint, "OutboxConsumer") as mock_consumer_cls,
+            patch.object(entrypoint, "start_http_server") as mock_start_server,
         ):
             mock_consumer = MagicMock()
             mock_consumer_cls.return_value = mock_consumer
@@ -47,8 +52,13 @@ class TestMain:
                 timeout=settings.http_timeout_seconds,
             )
             mock_build_agent.assert_called_once_with(settings, mock_client_cls.return_value)
-            mock_consumer_cls.assert_called_once_with(
-                settings=settings, agent=mock_build_agent.return_value
+            _, consumer_kwargs = mock_consumer_cls.call_args
+            assert consumer_kwargs["settings"] is settings
+            assert consumer_kwargs["agent"] is mock_build_agent.return_value
+            assert isinstance(consumer_kwargs["metrics"], PrometheusMetricsSink)
+            mock_start_server.assert_called_once_with(
+                settings.metrics_port,
+                registry=consumer_kwargs["metrics"].registry,
             )
             mock_consumer.run.assert_called_once()
             mock_consumer.close.assert_called_once()
@@ -60,6 +70,7 @@ class TestMain:
             patch.object(entrypoint, "AntiFraudHttpClient"),
             patch.object(entrypoint, "build_agent"),
             patch.object(entrypoint, "OutboxConsumer") as mock_consumer_cls,
+            patch.object(entrypoint, "start_http_server"),
         ):
             mock_consumer = MagicMock()
             mock_consumer.run.side_effect = RuntimeError("boom")
@@ -86,6 +97,7 @@ class TestMain:
             patch.object(entrypoint, "AntiFraudHttpClient"),
             patch.object(entrypoint, "build_agent"),
             patch.object(entrypoint, "OutboxConsumer") as mock_consumer_cls,
+            patch.object(entrypoint, "start_http_server"),
         ):
             mock_consumer_cls.return_value = MagicMock()
             with caplog.at_level(logging.DEBUG):
@@ -100,6 +112,35 @@ class TestMain:
         assert stop_flag() is False
         stop_flag.request_stop()
         assert stop_flag() is True
+
+
+class TestBuildMetricsSink:
+    """Pure sink-selection seam — no real HTTP server bound in these tests."""
+
+    def test_returns_prometheus_sink_when_metrics_enabled(self) -> None:
+        settings = _fake_settings(metrics_enabled=True)
+        with patch.object(entrypoint, "start_http_server") as mock_start_server:
+            sink = entrypoint.build_metrics_sink(settings)
+
+        assert isinstance(sink, PrometheusMetricsSink)
+        mock_start_server.assert_called_once_with(
+            settings.metrics_port, registry=sink.registry
+        )
+
+    def test_uses_configured_port_when_enabled(self) -> None:
+        settings = _fake_settings(metrics_enabled=True, metrics_port=9200)
+        with patch.object(entrypoint, "start_http_server") as mock_start_server:
+            entrypoint.build_metrics_sink(settings)
+
+        assert mock_start_server.call_args.args[0] == 9200
+
+    def test_returns_noop_sink_and_starts_no_server_when_disabled(self) -> None:
+        settings = _fake_settings(metrics_enabled=False)
+        with patch.object(entrypoint, "start_http_server") as mock_start_server:
+            sink = entrypoint.build_metrics_sink(settings)
+
+        assert isinstance(sink, NoOpMetricsSink)
+        mock_start_server.assert_not_called()
 
 
 class TestConfigureLogging:

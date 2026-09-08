@@ -16,9 +16,13 @@ import logging
 import signal
 from typing import Callable
 
+from prometheus_client import start_http_server
+
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
 from fraud_companion.adapters.kafka.consumer import OutboxConsumer
 from fraud_companion.adapters.llm.agent import build_agent
+from fraud_companion.adapters.metrics.prometheus_sink import PrometheusMetricsSink
+from fraud_companion.application.metrics_port import MetricsSink, NoOpMetricsSink
 from fraud_companion.config import Settings
 
 logger = logging.getLogger("fraud_companion")
@@ -65,6 +69,25 @@ def _install_signal_handlers(stop_flag: _StopFlag) -> None:
             pass
 
 
+def build_metrics_sink(settings: Settings) -> MetricsSink:
+    """Select and construct the :class:`MetricsSink` per ``settings.metrics_enabled``.
+
+    When enabled, builds a :class:`PrometheusMetricsSink` (its own private
+    registry) and starts the ``/metrics`` scrape server on
+    ``settings.metrics_port`` as a daemon thread — the process may exit
+    without waiting on it. When disabled, returns :class:`NoOpMetricsSink`
+    and starts no server at all.
+    """
+    if not settings.metrics_enabled:
+        return NoOpMetricsSink()
+
+    sink = PrometheusMetricsSink()
+    # prometheus_client's start_http_server already runs its WSGI server on
+    # a daemon thread internally, so the process can exit without joining it.
+    start_http_server(settings.metrics_port, registry=sink.registry)
+    return sink
+
+
 def main(
     *,
     should_stop: Callable[[], bool] | None = None,
@@ -92,7 +115,8 @@ def main(
         timeout=settings.http_timeout_seconds,
     )
     agent = build_agent(settings, http_client)
-    consumer = OutboxConsumer(settings=settings, agent=agent)
+    metrics = build_metrics_sink(settings)
+    consumer = OutboxConsumer(settings=settings, agent=agent, metrics=metrics)
 
     stop = should_stop
     if stop is None:
