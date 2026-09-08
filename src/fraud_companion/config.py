@@ -8,11 +8,11 @@ import os
 from dataclasses import dataclass, field
 
 DEFAULT_KAFKA_OUTBOX_TOPIC = "outbox.events"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_LLM_MODEL = "gemini-2.5-flash"
 #: Low temperature: the brief must be factual and reproducible, never creative.
-DEFAULT_GEMINI_TEMPERATURE = 0.2
+DEFAULT_LLM_TEMPERATURE = 0.2
 #: Caps the brief length so output-token cost stays bounded per case.
-DEFAULT_GEMINI_MAX_OUTPUT_TOKENS = 800
+DEFAULT_LLM_MAX_OUTPUT_TOKENS = 800
 #: Per-request HTTP timeout (seconds) for the anti-fraud API client. Prevents
 #: a slow/hung upstream from blocking the consumer poll thread indefinitely.
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
@@ -27,13 +27,13 @@ _ON_EXHAUSTED_CHOICES = frozenset({"crash", "skip"})
 _REQUIRED_ENV_VARS = (
     "ANTI_FRAUD_BASE_URL",
     "ANTI_FRAUD_AGENT_API_KEY",
-    "GOOGLE_API_KEY",
+    "LLM_API_KEY",
     "KAFKA_BOOTSTRAP_SERVERS",
     "KAFKA_GROUP_ID",
     "KAFKA_ORGANIZATION_ID",
 )
 
-_SECRET_FIELDS = frozenset({"anti_fraud_agent_api_key", "google_api_key"})
+_SECRET_FIELDS = frozenset({"anti_fraud_agent_api_key", "llm_api_key"})
 
 
 def _parse_positive_int(raw: str | None, default: int, var_name: str) -> int:
@@ -107,15 +107,15 @@ class MissingSettingError(RuntimeError):
 class Settings:
     anti_fraud_base_url: str
     anti_fraud_agent_api_key: str
-    google_api_key: str
+    llm_api_key: str
     kafka_bootstrap_servers: str
     kafka_group_id: str
     kafka_organization_id: str
     kafka_outbox_topic: str = field(default=DEFAULT_KAFKA_OUTBOX_TOPIC)
-    gemini_model: str = field(default=DEFAULT_GEMINI_MODEL)
-    gemini_temperature: float = field(default=DEFAULT_GEMINI_TEMPERATURE)
-    gemini_max_output_tokens: int = field(
-        default=DEFAULT_GEMINI_MAX_OUTPUT_TOKENS
+    llm_model: str = field(default=DEFAULT_LLM_MODEL)
+    llm_temperature: float = field(default=DEFAULT_LLM_TEMPERATURE)
+    llm_max_output_tokens: int = field(
+        default=DEFAULT_LLM_MAX_OUTPUT_TOKENS
     )
     http_timeout_seconds: float = field(default=DEFAULT_HTTP_TIMEOUT_SECONDS)
     kafka_max_delivery_attempts: int = field(
@@ -140,23 +140,23 @@ class Settings:
         return cls(
             anti_fraud_base_url=values["ANTI_FRAUD_BASE_URL"],
             anti_fraud_agent_api_key=values["ANTI_FRAUD_AGENT_API_KEY"],
-            google_api_key=values["GOOGLE_API_KEY"],
+            llm_api_key=values["LLM_API_KEY"],
             kafka_bootstrap_servers=values["KAFKA_BOOTSTRAP_SERVERS"],
             kafka_group_id=values["KAFKA_GROUP_ID"],
             kafka_organization_id=values["KAFKA_ORGANIZATION_ID"],
             kafka_outbox_topic=source.get(
                 "KAFKA_OUTBOX_TOPIC", DEFAULT_KAFKA_OUTBOX_TOPIC
             ),
-            gemini_model=source.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
-            gemini_temperature=_parse_temperature(
-                source.get("GEMINI_TEMPERATURE"),
-                DEFAULT_GEMINI_TEMPERATURE,
-                "GEMINI_TEMPERATURE",
+            llm_model=source.get("LLM_MODEL", DEFAULT_LLM_MODEL),
+            llm_temperature=_parse_temperature(
+                source.get("LLM_TEMPERATURE"),
+                DEFAULT_LLM_TEMPERATURE,
+                "LLM_TEMPERATURE",
             ),
-            gemini_max_output_tokens=_parse_positive_int(
-                source.get("GEMINI_MAX_OUTPUT_TOKENS"),
-                DEFAULT_GEMINI_MAX_OUTPUT_TOKENS,
-                "GEMINI_MAX_OUTPUT_TOKENS",
+            llm_max_output_tokens=_parse_positive_int(
+                source.get("LLM_MAX_OUTPUT_TOKENS"),
+                DEFAULT_LLM_MAX_OUTPUT_TOKENS,
+                "LLM_MAX_OUTPUT_TOKENS",
             ),
             http_timeout_seconds=_parse_positive_float(
                 source.get("HTTP_TIMEOUT_SECONDS"),

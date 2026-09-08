@@ -64,7 +64,7 @@ def settings() -> Settings:
     return Settings(
         anti_fraud_base_url="https://api.example.com",
         anti_fraud_agent_api_key="agent-key",
-        google_api_key="google-key",
+        llm_api_key="google-key",
         kafka_bootstrap_servers="localhost:9092",
         kafka_group_id="fraud-companion",
         kafka_organization_id="org-1",
@@ -188,7 +188,7 @@ def _retry_settings(**overrides) -> Settings:
     base = dict(
         anti_fraud_base_url="https://api.example.com",
         anti_fraud_agent_api_key="agent-key",
-        google_api_key="google-key",
+        llm_api_key="google-key",
         kafka_bootstrap_servers="localhost:9092",
         kafka_group_id="fraud-companion",
         kafka_organization_id="org-1",
@@ -421,7 +421,7 @@ def test_unset_kafka_organization_id_config_skips_and_commits_even_on_match(
     unconfigured_settings = Settings(
         anti_fraud_base_url="https://api.example.com",
         anti_fraud_agent_api_key="agent-key",
-        google_api_key="google-key",
+        llm_api_key="google-key",
         kafka_bootstrap_servers="localhost:9092",
         kafka_group_id="fraud-companion",
         kafka_organization_id="",

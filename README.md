@@ -54,7 +54,7 @@ These are enforced in code, not just documented:
   (wrong `event_type` header, or a `case.created`-headered message whose
   JSON body has a different `eventType`) is skipped, not acted on.
 - **No secret is ever logged.** `Settings.__repr__`/`__str__` redact
-  `google_api_key` and `anti_fraud_agent_api_key`; the entrypoint only
+  `llm_api_key` and `anti_fraud_agent_api_key`; the entrypoint only
   logs the case id and outcome, never the settings object, the raw event
   payload, or the `X-Agent-Api-Key` header.
 
@@ -64,12 +64,15 @@ These are enforced in code, not just documented:
 |---|---|---|
 | `ANTI_FRAUD_BASE_URL` | yes | — |
 | `ANTI_FRAUD_AGENT_API_KEY` | yes | — |
-| `GOOGLE_API_KEY` | yes | — |
+| `LLM_API_KEY` | yes | — |
 | `KAFKA_BOOTSTRAP_SERVERS` | yes | — |
 | `KAFKA_GROUP_ID` | yes | — |
 | `KAFKA_ORGANIZATION_ID` | yes | — |
 | `KAFKA_OUTBOX_TOPIC` | no | `outbox.events` |
-| `GEMINI_MODEL` | no | `gemini-2.5-flash` |
+| `LLM_MODEL` | no | `gemini-2.5-flash` |
+| `LLM_TEMPERATURE` | no | `0.2` |
+| `LLM_MAX_OUTPUT_TOKENS` | no | `800` |
+| `HTTP_TIMEOUT_SECONDS` | no | `30.0` |
 
 Missing any required variable fails fast at startup with a clear
 `MissingSettingError`, never a downstream stack trace with an unset value.
