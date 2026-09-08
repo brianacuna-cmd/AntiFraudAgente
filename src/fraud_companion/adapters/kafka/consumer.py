@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 import time
 from typing import Any, Callable
@@ -66,10 +67,13 @@ _PROVIDER_BACKPRESSURE_ERRORS = (AgentRateLimitedError, AgentUnavailableError)
 
 
 def _safe(fn: Any, *args: Any, **kwargs: Any) -> None:
-    """Call a metrics-sink method, swallowing any exception it raises.
+    """Call a best-effort side-effect, swallowing any exception it raises.
 
-    Mirrors ``case_created_handler._safe``: metrics emission must never
-    propagate into ``process_message``'s existing retry/commit behaviour.
+    Used for two kinds of non-critical side effects that must never crash the
+    poll loop: metrics-sink emission (mirrors ``case_created_handler._safe``)
+    and best-effort broker hints (``pause``/``seek``) on the escalation path —
+    correctness there is guaranteed by the in-process ``_paused_until`` state,
+    not by the broker call succeeding.
     """
     try:
         fn(*args, **kwargs)
@@ -218,6 +222,20 @@ class OutboxConsumer:
                 logger.error("Kafka consumer error: %s", err)
                 continue
 
+            # In-process park guard: never rely SOLELY on the broker's
+            # pause() to stop redelivery. If this partition is parked in our
+            # own state, skip the message and re-seek to the parked offset, so
+            # the partition stays put regardless of pause() semantics (a parked
+            # partition has resume_at=inf and is only cleared by resume).
+            parked = self._paused_until.get((msg.topic(), msg.partition()))
+            if parked is not None:
+                _resume_at, parked_offset = parked
+                _safe(
+                    self._consumer.seek,
+                    TopicPartition(msg.topic(), msg.partition(), parked_offset),
+                )
+                continue
+
             key = (msg.topic(), msg.partition(), msg.offset())
             try:
                 self.process_message(msg)
@@ -271,17 +289,23 @@ class OutboxConsumer:
         _safe(self._metrics.record_provider_error, kind=kind)
 
         if attempts > _BACKPRESSURE_MAX_ATTEMPTS:
-            # A "transient" condition that never clears is not transient. Stop
-            # stalling this partition silently: drop the bookkeeping and
-            # escalate loudly. The offset is still uncommitted, so on restart
-            # the case is reprocessed — nothing is lost, but the failure is now
-            # operator-visible instead of an endless WARNING loop.
+            # A "transient" condition that never clears is not transient, but
+            # it is still isolated to THIS partition — it must not crash the
+            # process or stall/affect any other partition. Drop the attempts
+            # bookkeeping, escalate loudly, and PARK this partition forever
+            # (resume_at = math.inf, so `_resume_elapsed_partitions()` never
+            # re-enables it: `resume_at <= clock()` is never true for `inf`).
+            # The offset stays uncommitted, so on restart or reassignment the
+            # case is reprocessed — nothing is lost, but the failure is now
+            # operator-visible instead of an endless WARNING loop, and other
+            # partitions keep flowing normally.
             self._backpressure_attempts.pop(key, None)
             logger.critical(
                 "LLM provider backpressure (%s) on key=%r UNRESOLVED after %d "
-                "attempts (%s[%d]@%d); escalating as a non-transient failure.",
+                "attempts (%s[%d]@%d); escalating as a non-transient failure. "
+                "Parking partition %s[%d] (offset %d left uncommitted).",
                 type(exc).__name__, msg.key(), _BACKPRESSURE_MAX_ATTEMPTS,
-                topic, partition, offset,
+                topic, partition, offset, topic, partition, offset,
             )
             _safe(
                 self._metrics.record_backpressure,
@@ -291,7 +315,13 @@ class OutboxConsumer:
             # handler's own record_case_outcome, so this is the sole emission
             # point for this case's failure — never a duplicate.
             _safe(self._metrics.record_case_outcome, "error")
-            raise exc
+            self._paused_until[(topic, partition)] = (math.inf, offset)
+            affected = TopicPartition(topic, partition)
+            # Best-effort broker hints: the in-process park state above is the
+            # source of truth, so a pause/seek failure must not crash the loop.
+            _safe(self._consumer.pause, [affected])
+            _safe(self._consumer.seek, TopicPartition(topic, partition, offset))
+            return
 
         delay = self._backpressure_delay(exc, attempts)
 
@@ -308,8 +338,10 @@ class OutboxConsumer:
 
         self._paused_until[(topic, partition)] = (self._clock() + delay, offset)
         affected = TopicPartition(topic, partition)
-        self._consumer.pause([affected])
-        self._consumer.seek(TopicPartition(topic, partition, offset))
+        # Best-effort broker hints; the in-process park state is the source of
+        # truth (see the run() park guard), so a failure here never crashes.
+        _safe(self._consumer.pause, [affected])
+        _safe(self._consumer.seek, TopicPartition(topic, partition, offset))
         # No blocking wait: control returns to the poll loop immediately, and
         # `_resume_elapsed_partitions()` resumes this partition once the
         # recorded deadline elapses — other partitions keep flowing meanwhile.
