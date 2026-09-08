@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from fraud_companion.adapters.http.errors import map_error_response
+from fraud_companion.config import DEFAULT_HTTP_TIMEOUT_SECONDS
 
 _API_PREFIX = "/api/v1"
 
@@ -24,16 +25,14 @@ class AntiFraudHttpClient:
     on PUT requests (there is a JSON body to describe).
     """
 
-    #: Fallback timeout (seconds) if none is supplied. Keeps a hung upstream
-    #: from blocking the caller (and the consumer poll thread) forever.
-    DEFAULT_TIMEOUT_SECONDS = 30.0
-
     def __init__(
         self, base_url: str, api_key: str, timeout: float | None = None
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
-        self._timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT_SECONDS
+        self._timeout = (
+            timeout if timeout is not None else DEFAULT_HTTP_TIMEOUT_SECONDS
+        )
 
     def _url(self, path: str) -> str:
         if not path.startswith("/"):

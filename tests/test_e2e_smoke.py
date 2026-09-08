@@ -50,7 +50,7 @@ def settings() -> Settings:
     return Settings(
         anti_fraud_base_url="https://api.example.com",
         anti_fraud_agent_api_key="secret-key",
-        google_api_key="secret-google-key",
+        llm_api_key="secret-google-key",
         kafka_bootstrap_servers="localhost:9092",
         kafka_group_id="fraud-companion",
         kafka_organization_id="org-1",

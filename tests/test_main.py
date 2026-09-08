@@ -19,7 +19,7 @@ def _fake_settings() -> Settings:
     return Settings(
         anti_fraud_base_url="https://anti-fraud.example.com",
         anti_fraud_agent_api_key="super-secret-agent-key",
-        google_api_key="super-secret-google-key",
+        llm_api_key="super-secret-google-key",
         kafka_bootstrap_servers="localhost:9092",
         kafka_group_id="fraud-companion",
         kafka_organization_id="org-1",
@@ -74,9 +74,9 @@ class TestMain:
         with patch.object(
             entrypoint.Settings,
             "from_env",
-            side_effect=MissingSettingError("GOOGLE_API_KEY"),
+            side_effect=MissingSettingError("LLM_API_KEY"),
         ):
-            with pytest.raises(MissingSettingError, match="GOOGLE_API_KEY"):
+            with pytest.raises(MissingSettingError, match="LLM_API_KEY"):
                 entrypoint.main(should_stop=lambda: True)
 
     def test_main_never_logs_secret_values(self, caplog: pytest.LogCaptureFixture) -> None:
@@ -93,7 +93,7 @@ class TestMain:
 
         log_text = caplog.text
         assert settings.anti_fraud_agent_api_key not in log_text
-        assert settings.google_api_key not in log_text
+        assert settings.llm_api_key not in log_text
 
     def test_install_signal_handlers_stops_loop_on_signal(self) -> None:
         stop_flag = entrypoint._StopFlag()

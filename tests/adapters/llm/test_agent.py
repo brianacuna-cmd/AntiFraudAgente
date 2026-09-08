@@ -29,7 +29,7 @@ def settings() -> Settings:
     return Settings(
         anti_fraud_base_url="https://anti-fraud.internal",
         anti_fraud_agent_api_key="super-secret-key",
-        google_api_key="google-secret-key",
+        llm_api_key="google-secret-key",
         kafka_bootstrap_servers="kafka-broker:9092",
         kafka_group_id="fraud-companion-consumer",
         kafka_organization_id="org-123",
@@ -50,8 +50,8 @@ class TestBuildAgent:
 
         mock_model_cls.assert_called_once()
         _, kwargs = mock_model_cls.call_args
-        assert kwargs["model"] == settings.gemini_model
-        assert kwargs["google_api_key"] == settings.google_api_key
+        assert kwargs["model"] == settings.llm_model
+        assert kwargs["google_api_key"] == settings.llm_api_key
 
     def test_passes_temperature_and_max_output_tokens_from_settings(
         self, settings: Settings, http_client: MagicMock
@@ -60,8 +60,8 @@ class TestBuildAgent:
             build_agent(settings, http_client)
 
         _, kwargs = mock_model_cls.call_args
-        assert kwargs["temperature"] == settings.gemini_temperature
-        assert kwargs["max_output_tokens"] == settings.gemini_max_output_tokens
+        assert kwargs["temperature"] == settings.llm_temperature
+        assert kwargs["max_output_tokens"] == settings.llm_max_output_tokens
 
     def test_api_key_value_never_appears_in_stdout_or_stderr(
         self, settings: Settings, http_client: MagicMock, capsys: pytest.CaptureFixture[str]
@@ -70,8 +70,8 @@ class TestBuildAgent:
             build_agent(settings, http_client)
 
         captured = capsys.readouterr()
-        assert settings.google_api_key not in captured.out
-        assert settings.google_api_key not in captured.err
+        assert settings.llm_api_key not in captured.out
+        assert settings.llm_api_key not in captured.err
 
     def test_wires_exactly_the_four_allowed_tools(
         self, settings: Settings, http_client: MagicMock

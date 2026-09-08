@@ -4,7 +4,7 @@ Wires ``Settings.from_env()`` -> ``AntiFraudHttpClient`` ->
 ``build_agent`` -> ``OutboxConsumer`` and runs the consumer poll loop
 until asked to stop (SIGINT/SIGTERM or an injected ``should_stop``).
 
-Nothing in this module ever logs a secret value (``GOOGLE_API_KEY``,
+Nothing in this module ever logs a secret value (``LLM_API_KEY``,
 ``ANTI_FRAUD_AGENT_API_KEY`` / the ``X-Agent-Api-Key`` header, or a raw
 brief body). ``Settings.__repr__`` already redacts secret fields, and we
 only ever log the case id and outcome, never the settings object or the

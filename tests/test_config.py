@@ -6,7 +6,7 @@ from fraud_companion.config import Settings, MissingSettingError
 REQUIRED_ENV = {
     "ANTI_FRAUD_BASE_URL": "https://anti-fraud.internal",
     "ANTI_FRAUD_AGENT_API_KEY": "super-secret-key",
-    "GOOGLE_API_KEY": "google-secret-key",
+    "LLM_API_KEY": "llm-secret-key",
     "KAFKA_BOOTSTRAP_SERVERS": "kafka-broker:9092",
     "KAFKA_GROUP_ID": "fraud-companion-consumer",
     "KAFKA_ORGANIZATION_ID": "org-123",
@@ -31,7 +31,7 @@ def test_loads_all_required_settings_from_env(monkeypatch):
 
     assert settings.anti_fraud_base_url == "https://anti-fraud.internal"
     assert settings.anti_fraud_agent_api_key == "super-secret-key"
-    assert settings.google_api_key == "google-secret-key"
+    assert settings.llm_api_key == "llm-secret-key"
     assert settings.kafka_bootstrap_servers == "kafka-broker:9092"
     assert settings.kafka_group_id == "fraud-companion-consumer"
     assert settings.kafka_organization_id == "org-123"
@@ -60,43 +60,50 @@ def test_http_timeout_rejects_non_positive(monkeypatch):
         Settings.from_env()
 
 
-def test_gemini_temperature_defaults_to_low_value(monkeypatch):
+def test_llm_temperature_defaults_to_low_value(monkeypatch):
     _set_env(monkeypatch)
 
     settings = Settings.from_env()
 
-    assert settings.gemini_temperature == 0.2
+    assert settings.llm_temperature == 0.2
 
 
-def test_gemini_temperature_can_be_overridden(monkeypatch):
-    _set_env(monkeypatch, overrides={"GEMINI_TEMPERATURE": "0.7"})
+def test_llm_temperature_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"LLM_TEMPERATURE": "0.7"})
 
     settings = Settings.from_env()
 
-    assert settings.gemini_temperature == 0.7
+    assert settings.llm_temperature == 0.7
 
 
-def test_gemini_temperature_rejects_out_of_range(monkeypatch):
-    _set_env(monkeypatch, overrides={"GEMINI_TEMPERATURE": "3"})
+def test_llm_temperature_rejects_out_of_range(monkeypatch):
+    _set_env(monkeypatch, overrides={"LLM_TEMPERATURE": "3"})
 
     with pytest.raises(ValueError):
         Settings.from_env()
 
 
-def test_gemini_max_output_tokens_defaults(monkeypatch):
+def test_llm_max_output_tokens_defaults(monkeypatch):
     _set_env(monkeypatch)
 
     settings = Settings.from_env()
 
-    assert settings.gemini_max_output_tokens == 800
+    assert settings.llm_max_output_tokens == 800
 
 
-def test_gemini_max_output_tokens_can_be_overridden(monkeypatch):
-    _set_env(monkeypatch, overrides={"GEMINI_MAX_OUTPUT_TOKENS": "1200"})
+def test_llm_max_output_tokens_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"LLM_MAX_OUTPUT_TOKENS": "1200"})
 
     settings = Settings.from_env()
 
-    assert settings.gemini_max_output_tokens == 1200
+    assert settings.llm_max_output_tokens == 1200
+
+
+def test_llm_max_output_tokens_rejects_non_positive(monkeypatch):
+    _set_env(monkeypatch, overrides={"LLM_MAX_OUTPUT_TOKENS": "0"})
+
+    with pytest.raises(ValueError):
+        Settings.from_env()
 
 
 def test_kafka_outbox_topic_defaults_to_outbox_events(monkeypatch):
@@ -115,21 +122,21 @@ def test_kafka_outbox_topic_can_be_overridden(monkeypatch):
     assert settings.kafka_outbox_topic == "custom.topic"
 
 
-def test_gemini_model_has_a_sensible_default(monkeypatch):
+def test_llm_model_has_a_sensible_default(monkeypatch):
     _set_env(monkeypatch)
 
     settings = Settings.from_env()
 
-    assert settings.gemini_model
-    assert isinstance(settings.gemini_model, str)
+    assert settings.llm_model == "gemini-2.5-flash"
+    assert isinstance(settings.llm_model, str)
 
 
-def test_gemini_model_can_be_overridden(monkeypatch):
-    _set_env(monkeypatch, overrides={"GEMINI_MODEL": "gemini-custom-model"})
+def test_llm_model_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"LLM_MODEL": "gemini-custom-model"})
 
     settings = Settings.from_env()
 
-    assert settings.gemini_model == "gemini-custom-model"
+    assert settings.llm_model == "gemini-custom-model"
 
 
 def test_delivery_retry_settings_have_sensible_defaults(monkeypatch):
@@ -182,7 +189,7 @@ def test_invalid_max_delivery_attempts_rejected(monkeypatch, bad_value):
     [
         "ANTI_FRAUD_BASE_URL",
         "ANTI_FRAUD_AGENT_API_KEY",
-        "GOOGLE_API_KEY",
+        "LLM_API_KEY",
         "KAFKA_BOOTSTRAP_SERVERS",
         "KAFKA_GROUP_ID",
         "KAFKA_ORGANIZATION_ID",
@@ -197,6 +204,18 @@ def test_missing_required_var_raises_clear_error(monkeypatch, missing_var):
     assert missing_var in str(exc_info.value)
 
 
+def test_only_legacy_google_api_key_fails_loud(monkeypatch):
+    """Legacy GOOGLE_API_KEY/GEMINI_* env vars are no longer read."""
+    _set_env(monkeypatch, omit=["LLM_API_KEY"])
+    monkeypatch.setenv("GOOGLE_API_KEY", "legacy-google-key")
+    monkeypatch.setenv("GEMINI_MODEL", "legacy-model")
+
+    with pytest.raises(MissingSettingError) as exc_info:
+        Settings.from_env()
+
+    assert "LLM_API_KEY" in str(exc_info.value)
+
+
 def test_repr_never_leaks_secret_values(monkeypatch):
     _set_env(monkeypatch)
 
@@ -204,4 +223,4 @@ def test_repr_never_leaks_secret_values(monkeypatch):
     rendered = repr(settings)
 
     assert "super-secret-key" not in rendered
-    assert "google-secret-key" not in rendered
+    assert "llm-secret-key" not in rendered

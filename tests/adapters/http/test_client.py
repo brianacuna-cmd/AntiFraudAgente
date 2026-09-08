@@ -7,6 +7,7 @@ import httpx
 import pytest
 import respx
 
+from fraud_companion import config
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
 from fraud_companion.adapters.http.errors import (
     ApiError,
@@ -70,6 +71,16 @@ def test_get_uses_a_default_timeout_when_unspecified():
     _, kwargs = mock_get.call_args
     assert kwargs["timeout"] is not None
     assert kwargs["timeout"] > 0
+
+
+def test_default_timeout_tracks_single_source_config_constant():
+    client = AntiFraudHttpClient(base_url=BASE_URL, api_key=API_KEY)
+    with patch("fraud_companion.adapters.http.client.httpx.get") as mock_get:
+        mock_get.return_value = httpx.Response(200, json={})
+        client.get("/cases/1")
+
+    _, kwargs = mock_get.call_args
+    assert kwargs["timeout"] == config.DEFAULT_HTTP_TIMEOUT_SECONDS
 
 
 @respx.mock
