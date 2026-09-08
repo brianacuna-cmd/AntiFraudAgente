@@ -298,3 +298,86 @@ def test_handle_case_created_accepts_string_or_null_assigned_to() -> None:
 
     assert result_str is HandleResult.PROCESSED
     assert result_null is HandleResult.PROCESSED
+
+
+class _FakeMetricsSink:
+    def __init__(self, *, raise_on_call: bool = False) -> None:
+        self.raise_on_call = raise_on_call
+        self.token_usage_calls: list[dict] = []
+        self.case_outcome_calls: list[str] = []
+
+    def observe_token_usage(self, *, input: int, output: int, total: int) -> None:
+        if self.raise_on_call:
+            raise RuntimeError("boom")
+        self.token_usage_calls.append({"input": input, "output": output, "total": total})
+
+    def record_case_outcome(self, outcome: str) -> None:
+        if self.raise_on_call:
+            raise RuntimeError("boom")
+        self.case_outcome_calls.append(outcome)
+
+    def record_backpressure(self, *, kind: str, attempt: int, escalated: bool) -> None:
+        pass
+
+    def record_provider_error(self, *, kind: str) -> None:
+        pass
+
+
+def test_handle_case_created_emits_token_usage_and_outcome() -> None:
+    class _UsageAgent(_FakeAgent):
+        def invoke(self, input_: dict) -> dict:
+            self.invocations.append(input_)
+            return {
+                "messages": [
+                    _UsageMessage(10, 5),
+                    _ToolMessage("put_agent_brief"),
+                ]
+            }
+
+    agent = _UsageAgent()
+    metrics = _FakeMetricsSink()
+
+    result = handle_case_created(_envelope(), agent, metrics=metrics)
+
+    assert result is HandleResult.PROCESSED
+    assert metrics.token_usage_calls == [{"input": 10, "output": 5, "total": 15}]
+    assert metrics.case_outcome_calls == ["PROCESSED"]
+
+
+def test_handle_case_created_emits_outcome_exactly_once_for_brief_not_written_error() -> None:
+    agent = _FakeAgent(wrote_brief=False)
+    metrics = _FakeMetricsSink()
+
+    with pytest.raises(BriefNotWrittenError):
+        handle_case_created(_envelope(), agent, metrics=metrics)
+
+    assert metrics.case_outcome_calls == ["brief_not_written"]
+
+
+def test_handle_case_created_works_without_metrics_param() -> None:
+    agent = _FakeAgent()
+
+    result = handle_case_created(_envelope(), agent)
+
+    assert result is HandleResult.PROCESSED
+
+
+def test_handle_case_created_survives_raising_metrics_sink() -> None:
+    agent = _FakeAgent()
+    metrics = _FakeMetricsSink(raise_on_call=True)
+
+    result = handle_case_created(_envelope(), agent, metrics=metrics)
+
+    assert result is HandleResult.PROCESSED
+
+
+def test_handle_case_created_identical_outcome_with_noop_and_recording_sink() -> None:
+    from fraud_companion.application.metrics_port import NoOpMetricsSink
+
+    agent_a = _FakeAgent()
+    agent_b = _FakeAgent()
+
+    result_noop = handle_case_created(_envelope(), agent_a, metrics=NoOpMetricsSink())
+    result_fake = handle_case_created(_envelope(), agent_b, metrics=_FakeMetricsSink())
+
+    assert result_noop == result_fake

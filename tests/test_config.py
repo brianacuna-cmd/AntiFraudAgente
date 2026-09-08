@@ -240,3 +240,59 @@ def test_repr_never_leaks_secret_values(monkeypatch):
 
     assert "super-secret-key" not in rendered
     assert "llm-secret-key" not in rendered
+
+
+def test_metrics_enabled_defaults_to_true(monkeypatch):
+    _set_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.metrics_enabled is True
+
+
+@pytest.mark.parametrize("truthy", ["true", "True", "TRUE", "1", "yes", "YES"])
+def test_metrics_enabled_accepts_truthy_tokens(monkeypatch, truthy):
+    _set_env(monkeypatch, overrides={"METRICS_ENABLED": truthy})
+
+    settings = Settings.from_env()
+
+    assert settings.metrics_enabled is True
+
+
+@pytest.mark.parametrize("falsy", ["false", "False", "FALSE", "0", "no", "NO"])
+def test_metrics_enabled_accepts_falsy_tokens(monkeypatch, falsy):
+    _set_env(monkeypatch, overrides={"METRICS_ENABLED": falsy})
+
+    settings = Settings.from_env()
+
+    assert settings.metrics_enabled is False
+
+
+def test_metrics_enabled_rejects_invalid_token(monkeypatch):
+    _set_env(monkeypatch, overrides={"METRICS_ENABLED": "maybe"})
+
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_metrics_port_defaults(monkeypatch):
+    _set_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.metrics_port == 9100
+
+
+def test_metrics_port_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"METRICS_PORT": "9200"})
+
+    settings = Settings.from_env()
+
+    assert settings.metrics_port == 9200
+
+
+def test_metrics_port_rejects_non_positive(monkeypatch):
+    _set_env(monkeypatch, overrides={"METRICS_PORT": "0"})
+
+    with pytest.raises(ValueError):
+        Settings.from_env()

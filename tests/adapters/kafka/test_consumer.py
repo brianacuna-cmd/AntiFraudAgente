@@ -100,7 +100,7 @@ def test_case_created_message_triggers_handler_and_commits(
         consumer = OutboxConsumer(settings=settings, agent=fake_agent)
         consumer.process_message(msg)
 
-    mock_handle.assert_called_once_with(envelope, fake_agent)
+    mock_handle.assert_called_once_with(envelope, fake_agent, consumer._metrics)
     mock_consumer.commit.assert_called_once_with(msg)
 
 
@@ -384,7 +384,7 @@ def test_matching_organization_id_processes_as_before(mock_consumer_cls, setting
         consumer = OutboxConsumer(settings=settings, agent=fake_agent)
         consumer.process_message(msg)
 
-    mock_handle.assert_called_once_with(envelope, fake_agent)
+    mock_handle.assert_called_once_with(envelope, fake_agent, consumer._metrics)
     mock_consumer.commit.assert_called_once_with(msg)
 
 
@@ -617,4 +617,229 @@ def test_persistent_backpressure_escalates_loudly_after_cap_without_commit(
                 consumer.run(should_stop=lambda: False, poll_timeout=0)
 
     assert "UNRESOLVED" in caplog.text
+    mock_consumer.commit.assert_not_called()
+
+
+# --- Metrics emission (Slice A) ----------------------------------------------
+
+from fraud_companion.application.metrics_port import NoOpMetricsSink  # noqa: E402
+
+
+class _FakeMetricsSink:
+    def __init__(self, *, raise_on_call: bool = False) -> None:
+        self.raise_on_call = raise_on_call
+        self.token_usage_calls: list[dict] = []
+        self.case_outcome_calls: list[str] = []
+        self.backpressure_calls: list[dict] = []
+        self.provider_error_calls: list[dict] = []
+
+    def observe_token_usage(self, *, input: int, output: int, total: int) -> None:
+        pass
+
+    def record_case_outcome(self, outcome: str) -> None:
+        if self.raise_on_call:
+            raise RuntimeError("boom")
+        self.case_outcome_calls.append(outcome)
+
+    def record_backpressure(self, *, kind: str, attempt: int, escalated: bool) -> None:
+        if self.raise_on_call:
+            raise RuntimeError("boom")
+        self.backpressure_calls.append(
+            {"kind": kind, "attempt": attempt, "escalated": escalated}
+        )
+
+    def record_provider_error(self, *, kind: str) -> None:
+        if self.raise_on_call:
+            raise RuntimeError("boom")
+        self.provider_error_calls.append({"kind": kind})
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_outbox_consumer_defaults_to_noop_metrics_sink(mock_consumer_cls, settings, fake_agent):
+    consumer = OutboxConsumer(settings=settings, agent=fake_agent)
+
+    assert isinstance(consumer._metrics, NoOpMetricsSink)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_rate_limited_retry_records_backpressure_and_provider_error(
+    mock_consumer_cls, _mock_uniform, _mock_sleep, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=7,
+    )
+    mock_consumer.poll.return_value = msg
+    metrics = _FakeMetricsSink()
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 1
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentRateLimitedError("429", retry_after=5.0),
+    ):
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent, metrics=metrics)
+        consumer.run(should_stop=stop, poll_timeout=0)
+
+    assert metrics.backpressure_calls == [
+        {"kind": "rate_limited", "attempt": 1, "escalated": False}
+    ]
+    assert metrics.provider_error_calls == [{"kind": "rate_limited"}]
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer._BACKPRESSURE_MAX_ATTEMPTS", 1)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_backpressure_escalation_records_escalated_backpressure_and_outcome(
+    mock_consumer_cls, _mock_uniform, _mock_sleep, fake_agent, caplog
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=4,
+    )
+    mock_consumer.poll.return_value = msg
+    metrics = _FakeMetricsSink()
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentUnavailableError("503"),
+    ):
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent, metrics=metrics)
+        with caplog.at_level("CRITICAL"):
+            with pytest.raises(AgentUnavailableError):
+                consumer.run(should_stop=lambda: False, poll_timeout=0)
+
+    assert metrics.backpressure_calls == [
+        {"kind": "unavailable", "attempt": 1, "escalated": False},
+        {"kind": "unavailable", "attempt": 2, "escalated": True},
+    ]
+    assert metrics.case_outcome_calls == ["error"]
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_process_failure_exhaustion_records_outcome_error_once(
+    mock_consumer_cls, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=9,
+    )
+    mock_consumer.poll.return_value = msg
+    metrics = _FakeMetricsSink()
+
+    settings = _retry_settings(kafka_max_delivery_attempts=2, kafka_on_exhausted="skip")
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 3
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=RuntimeError("permanent"),
+    ):
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent, metrics=metrics)
+        consumer.run(should_stop=stop, poll_timeout=0)
+
+    assert metrics.case_outcome_calls == ["error"]
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_normal_processed_path_does_not_double_emit_outcome(
+    mock_consumer_cls, settings, fake_agent
+):
+    # The handler owns the outcome for its own HandleResult; the consumer must
+    # not also emit it for the same success path (avoids double-count).
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    envelope = _case_created_envelope()
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(envelope).encode("utf-8"),
+    )
+    metrics = _FakeMetricsSink()
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        return_value=HandleResult.PROCESSED,
+    ):
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent, metrics=metrics)
+        consumer.process_message(msg)
+
+    assert metrics.case_outcome_calls == []
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_process_message_passes_metrics_into_handler(mock_consumer_cls, settings, fake_agent):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    envelope = _case_created_envelope()
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(envelope).encode("utf-8"),
+    )
+    metrics = _FakeMetricsSink()
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        return_value=HandleResult.PROCESSED,
+    ) as mock_handle:
+        consumer = OutboxConsumer(settings=settings, agent=fake_agent, metrics=metrics)
+        consumer.process_message(msg)
+
+    mock_handle.assert_called_once_with(envelope, fake_agent, metrics)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_raising_metrics_sink_does_not_break_backpressure_handling(
+    mock_consumer_cls, _mock_uniform, _mock_sleep, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        offset=7,
+    )
+    mock_consumer.poll.return_value = msg
+    metrics = _FakeMetricsSink(raise_on_call=True)
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 1
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentRateLimitedError("429", retry_after=5.0),
+    ):
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent, metrics=metrics)
+        consumer.run(should_stop=stop, poll_timeout=0)  # must not raise
+
     mock_consumer.commit.assert_not_called()

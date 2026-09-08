@@ -33,6 +33,7 @@ from enum import Enum, auto
 from typing import Any
 
 from fraud_companion.adapters.http.errors import CaseClosedError, CaseNotFoundError
+from fraud_companion.application.metrics_port import MetricsSink, NoOpMetricsSink
 from fraud_companion.domain.events import CASE_CREATED_EVENT
 
 logger = logging.getLogger(__name__)
@@ -173,6 +174,20 @@ class HandleResult(Enum):
     SKIPPED_MALFORMED = auto()
 
 
+def _safe(fn: Any, *args: Any, **kwargs: Any) -> None:
+    """Call a metrics-sink method, swallowing any exception it raises.
+
+    Metrics are observability, not correctness: a broken/raising sink must
+    never alter case-processing control flow (see "Emission Is
+    Side-Effect-Only"). Mirrors the existing never-fail-the-case convention
+    used for token-usage logging above.
+    """
+    try:
+        fn(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - metrics emission must never fail the case
+        logger.warning("Metrics emission failed via %r; continuing.", fn)
+
+
 def _extract_case_id(event: dict[str, Any]) -> str:
     payload = event.get("payload")
     if not isinstance(payload, dict):
@@ -183,7 +198,11 @@ def _extract_case_id(event: dict[str, Any]) -> str:
     return str(case_id)
 
 
-def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
+def handle_case_created(
+    event: dict[str, Any],
+    agent: Any,
+    metrics: MetricsSink = NoOpMetricsSink(),
+) -> HandleResult:
     """Handle one parsed ``case.created`` event envelope.
 
     ``agent`` is the compiled LangGraph agent returned by
@@ -247,6 +266,7 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
             "not retrying.",
             case_id,
         )
+        _safe(metrics.record_case_outcome, HandleResult.SKIPPED_TERMINAL.name)
         return HandleResult.SKIPPED_TERMINAL
     except Exception:
         logger.warning(
@@ -264,6 +284,12 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
             usage["output_tokens"],
             usage["total_tokens"],
         )
+        _safe(
+            metrics.observe_token_usage,
+            input=usage["input_tokens"],
+            output=usage["output_tokens"],
+            total=usage["total_tokens"],
+        )
     except Exception:  # noqa: BLE001 - usage logging must never fail the case
         logger.warning(
             "Failed to compute token usage for caseId=%s; continuing.", case_id
@@ -277,6 +303,7 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
             "Terminal error surfaced as ToolMessage for caseId=%s; not retrying.",
             case_id,
         )
+        _safe(metrics.record_case_outcome, HandleResult.SKIPPED_TERMINAL.name)
         return HandleResult.SKIPPED_TERMINAL
 
     if not _brief_was_written(result):
@@ -288,9 +315,11 @@ def handle_case_created(event: dict[str, Any], agent: Any) -> HandleResult:
             case_id,
             _PUT_AGENT_BRIEF_TOOL,
         )
+        _safe(metrics.record_case_outcome, "brief_not_written")
         raise BriefNotWrittenError(
             f"agent did not call {_PUT_AGENT_BRIEF_TOOL} for caseId={case_id}"
         )
 
     logger.info("Processed case.created for caseId=%s", case_id)
+    _safe(metrics.record_case_outcome, HandleResult.PROCESSED.name)
     return HandleResult.PROCESSED
