@@ -8,6 +8,7 @@ Fake message objects only implement the subset of the confluent-kafka
 from __future__ import annotations
 
 import json
+import math
 import time
 from unittest.mock import MagicMock, patch
 
@@ -730,7 +731,12 @@ def test_unavailable_uses_exponential_backoff_when_no_retry_after(
 
     def stop() -> bool:
         checks["n"] += 1
-        return checks["n"] > 2  # two backpressure iterations; clock never advances
+        # After the first attempt parks the partition (resume_at = 0 + 2.0),
+        # advance the clock past it so `_resume_elapsed_partitions()` resumes
+        # the partition and the message is reprocessed for a second attempt.
+        if checks["n"] == 2:
+            fake_clock.advance(3)  # clock 0 -> 3, past the 2.0 deadline
+        return checks["n"] > 3
 
     with patch(
         "fraud_companion.adapters.kafka.consumer.handle_case_created",
@@ -743,12 +749,12 @@ def test_unavailable_uses_exponential_backoff_when_no_retry_after(
         )
         consumer.run(should_stop=stop, poll_timeout=0)
 
-    # base * 2^(attempt-1): 2 then 4 (jitter patched to 0). The clock never
-    # advances, so the final recorded resume_at reflects the second attempt's
-    # delay relative to the (unchanged) clock reading: 0 + 4.0.
+    # Exponential backoff base * 2^(attempt-1): attempt 1 delay = 2.0 (parked at
+    # clock 0), attempt 2 delay = 4.0 (parked at clock 3 after resume) -> the
+    # final recorded resume_at is 3 + 4.0 = 7.0, proving the delay grew to 4.0.
     key = ("outbox.events", 0)
     resume_at, offset = consumer._paused_until[key]
-    assert resume_at == 4.0
+    assert resume_at == 7.0
     assert offset == 3
     # No blocking sleep anywhere on the backpressure path.
     mock_sleep.assert_not_called()
@@ -797,8 +803,10 @@ def test_persistent_backpressure_escalates_loudly_after_cap_without_commit(
     mock_consumer_cls, _mock_uniform, _mock_sleep, fake_agent, caplog
 ):
     # A mislabelled-transient (permanent) 429/5xx must NOT retry forever: once
-    # the backpressure cap is exceeded it escalates (crashes) with a CRITICAL
-    # log, and still never commits (no data loss — reprocessed on restart).
+    # the backpressure cap is exceeded it escalates with a CRITICAL log and
+    # PARKS that partition — but it must NOT raise out of run() or crash the
+    # process, and it still never commits (no data loss — reprocessed on
+    # restart).
     mock_consumer = MagicMock()
     mock_consumer_cls.return_value = mock_consumer
 
@@ -809,16 +817,147 @@ def test_persistent_backpressure_escalates_loudly_after_cap_without_commit(
     )
     mock_consumer.poll.return_value = msg
 
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        # cap patched to 3: stop right after the 4th iteration (attempts=4>3
+        # triggers escalation+park); further iterations would re-attempt from
+        # a fresh (popped) counter and overwrite the parked state.
+        return checks["n"] > 4
+
     with patch(
         "fraud_companion.adapters.kafka.consumer.handle_case_created",
         side_effect=AgentRateLimitedError("permanent 429"),
     ):
-        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent)
+        consumer = OutboxConsumer(
+            settings=_retry_settings(), agent=fake_agent, clock=_FakeClock()
+        )
         with caplog.at_level("CRITICAL"):
-            with pytest.raises(AgentRateLimitedError):
-                consumer.run(should_stop=lambda: False, poll_timeout=0)
+            consumer.run(should_stop=stop, poll_timeout=0)  # must NOT raise
 
     assert "UNRESOLVED" in caplog.text
+    mock_consumer.commit.assert_not_called()
+    key = ("outbox.events", 0)
+    resume_at, offset = consumer._paused_until[key]
+    assert resume_at == math.inf
+    assert offset == 4
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer._BACKPRESSURE_MAX_ATTEMPTS", 1)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_backpressure_exhaustion_is_partition_scoped_no_process_crash(
+    mock_consumer_cls, _mock_uniform, _mock_sleep, fake_agent, caplog
+):
+    # tp0 exhausts its backpressure budget while tp1 keeps flowing normally
+    # in the SAME run() invocation — proving escalation is scoped to the
+    # exhausted partition and never crashes/affects other partitions.
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg_tp0 = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope("case-tp0")).encode("utf-8"),
+        topic="outbox.events",
+        partition=0,
+        offset=5,
+    )
+    msg_tp1 = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope("case-tp1")).encode("utf-8"),
+        topic="outbox.events",
+        partition=1,
+        offset=1,
+    )
+    # tp0 is polled twice (attempt 1 then escalating attempt 2), tp1 is
+    # polled once and interleaved after tp0 has already exceeded the cap.
+    mock_consumer.poll.side_effect = [msg_tp0, msg_tp0, msg_tp1]
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 3
+
+    def handle_side_effect(envelope, agent, metrics):
+        if envelope["payload"]["caseId"] == "case-tp0":
+            raise AgentRateLimitedError("429")
+        return HandleResult.PROCESSED
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=handle_side_effect,
+    ):
+        consumer = OutboxConsumer(
+            settings=_retry_settings(), agent=fake_agent, clock=_FakeClock()
+        )
+        with caplog.at_level("CRITICAL"):
+            consumer.run(should_stop=stop, poll_timeout=0)  # must NOT raise
+
+    assert "UNRESOLVED" in caplog.text
+    # tp1 kept processing/committing despite tp0's exhaustion.
+    mock_consumer.commit.assert_called_once_with(msg_tp1)
+    # tp0's exhausted offset is never committed (default kafka_on_exhausted).
+    for call in mock_consumer.commit.call_args_list:
+        committed_msg = call.args[0]
+        assert committed_msg is not msg_tp0
+    # tp0 parked forever (resume_at = inf) — never affects tp1's key.
+    tp0_key = ("outbox.events", 0)
+    resume_at, offset = consumer._paused_until[tp0_key]
+    assert resume_at == math.inf
+    assert offset == 5
+    assert ("outbox.events", 1) not in consumer._paused_until
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_backpressure_respects_attempt_cap_and_never_commits_while_paused(
+    mock_consumer_cls, _mock_uniform, _mock_sleep, fake_agent
+):
+    # Bounded retry + no-data-loss guarantees (R4a, R4b) must survive the
+    # partition-scoped escalation rewrite: attempts still increment per
+    # (topic,partition,offset) and are enforced before escalation, and the
+    # offset is never committed while paused/retrying below the cap.
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        topic="outbox.events",
+        partition=0,
+        offset=2,
+    )
+    mock_consumer.poll.return_value = msg
+
+    fake_clock = _FakeClock()
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 2  # two below-cap attempts; clock never advances
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentRateLimitedError("429"),
+    ):
+        consumer = OutboxConsumer(
+            settings=_retry_settings(), agent=fake_agent, clock=fake_clock
+        )
+        consumer.run(should_stop=stop, poll_timeout=0)  # must not raise
+
+    # Attempts tracked per (topic, partition, offset), below the (default 20)
+    # cap, so no escalation yet.
+    key = ("outbox.events", 0, 2)
+    assert consumer._backpressure_attempts[key] == 2
+    key_paused = ("outbox.events", 0)
+    resume_at, offset = consumer._paused_until[key_paused]
+    assert resume_at != math.inf  # still finite: not escalated/parked forever
+    assert offset == 2
+    # Never committed while paused/retrying below the cap.
     mock_consumer.commit.assert_not_called()
 
 
@@ -917,14 +1056,23 @@ def test_backpressure_escalation_records_escalated_backpressure_and_outcome(
     mock_consumer.poll.return_value = msg
     metrics = _FakeMetricsSink()
 
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        # cap patched to 1: stop right after the 2nd iteration (attempt=2>1
+        # escalates+parks); further iterations would re-attempt fresh.
+        return checks["n"] > 2
+
     with patch(
         "fraud_companion.adapters.kafka.consumer.handle_case_created",
         side_effect=AgentUnavailableError("503"),
     ):
-        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent, metrics=metrics)
+        consumer = OutboxConsumer(
+            settings=_retry_settings(), agent=fake_agent, metrics=metrics, clock=_FakeClock()
+        )
         with caplog.at_level("CRITICAL"):
-            with pytest.raises(AgentUnavailableError):
-                consumer.run(should_stop=lambda: False, poll_timeout=0)
+            consumer.run(should_stop=stop, poll_timeout=0)  # must NOT raise
 
     assert metrics.backpressure_calls == [
         {"kind": "unavailable", "attempt": 1, "escalated": False},
@@ -1045,3 +1193,47 @@ def test_raising_metrics_sink_does_not_break_backpressure_handling(
         consumer.run(should_stop=stop, poll_timeout=0)  # must not raise
 
     mock_consumer.commit.assert_not_called()
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_parked_partition_message_is_skipped_even_if_pause_is_ignored(
+    mock_consumer_cls, _mock_sleep, fake_agent
+):
+    # In-process park guard: even if the broker keeps redelivering a parked
+    # partition's message (pause() ineffective), the consumer must NOT
+    # re-process it — it seeks back and skips, never committing.
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        topic="outbox.events",
+        partition=1,
+        offset=9,
+    )
+    mock_consumer.poll.return_value = msg  # broker ignores pause(), keeps redelivering
+
+    consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent)
+    # Pre-park the partition (as escalation would): resume_at=inf.
+    consumer._paused_until[("outbox.events", 1)] = (float("inf"), 9)
+
+    calls = {"n": 0}
+
+    def stop() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 3
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created"
+    ) as mock_handle:
+        consumer.run(should_stop=stop, poll_timeout=0)
+
+    # Never processed and never committed the parked partition's message.
+    mock_handle.assert_not_called()
+    mock_consumer.commit.assert_not_called()
+    # Re-seeks back to the parked offset to hold position.
+    assert mock_consumer.seek.called
+    tp = mock_consumer.seek.call_args.args[0]
+    assert (tp.topic, tp.partition, tp.offset) == ("outbox.events", 1, 9)
