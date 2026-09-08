@@ -8,6 +8,7 @@ Fake message objects only implement the subset of the confluent-kafka
 from __future__ import annotations
 
 import json
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +16,23 @@ import pytest
 from fraud_companion.adapters.kafka.consumer import OutboxConsumer
 from fraud_companion.application.case_created_handler import HandleResult
 from fraud_companion.config import Settings
+
+
+class _FakeClock:
+    """A controllable stand-in for ``time.monotonic`` used by tests.
+
+    Never advances on its own — tests call :meth:`advance` explicitly, so
+    scenarios are fully deterministic and zero real time elapses.
+    """
+
+    def __init__(self, start: float = 0.0) -> None:
+        self._t = start
+
+    def __call__(self) -> float:
+        return self._t
+
+    def advance(self, seconds: float) -> None:
+        self._t += seconds
 
 
 class _FakeMessage:
@@ -472,6 +490,39 @@ from fraud_companion.application.agent_port import (  # noqa: E402
 )
 
 
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_outbox_consumer_accepts_injectable_clock(mock_consumer_cls, settings, fake_agent):
+    fake_clock = _FakeClock()
+
+    consumer = OutboxConsumer(settings=settings, agent=fake_agent, clock=fake_clock)
+    assert consumer._clock is fake_clock
+
+    default_consumer = OutboxConsumer(settings=settings, agent=fake_agent)
+    assert default_consumer._clock is time.monotonic
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_resume_elapsed_partitions_resumes_only_elapsed(mock_consumer_cls, settings, fake_agent):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    fake_clock = _FakeClock(start=100.0)
+    consumer = OutboxConsumer(settings=settings, agent=fake_agent, clock=fake_clock)
+
+    consumer._paused_until[("outbox.events", 0)] = (100.0, 5)  # elapsed (<=)
+    consumer._paused_until[("outbox.events", 1)] = (200.0, 9)  # not elapsed yet
+
+    consumer._resume_elapsed_partitions()
+
+    mock_consumer.resume.assert_called_once()
+    resumed_tp = mock_consumer.resume.call_args.args[0][0]
+    assert (resumed_tp.topic, resumed_tp.partition) == ("outbox.events", 0)
+    seek_tp = mock_consumer.seek.call_args.args[0]
+    assert (seek_tp.topic, seek_tp.partition, seek_tp.offset) == ("outbox.events", 0, 5)
+    assert ("outbox.events", 0) not in consumer._paused_until
+    assert ("outbox.events", 1) in consumer._paused_until
+
+
 @patch("fraud_companion.adapters.kafka.consumer.time.sleep")
 @patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
 @patch("fraud_companion.adapters.kafka.consumer.Consumer")
@@ -490,30 +541,172 @@ def test_rate_limited_pauses_seeks_honors_retry_after_and_resumes_without_commit
     )
     mock_consumer.poll.return_value = msg
 
+    fake_clock = _FakeClock()
     checks = {"n": 0}
 
     def stop() -> bool:
         checks["n"] += 1
-        return checks["n"] > 1
+        if checks["n"] == 2:
+            fake_clock.advance(5.0)  # elapse retry_after before the next iteration
+        return checks["n"] > 2
 
     with patch(
         "fraud_companion.adapters.kafka.consumer.handle_case_created",
         side_effect=AgentRateLimitedError("429", retry_after=5.0),
     ):
-        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent)
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent, clock=fake_clock)
         consumer.run(should_stop=stop, poll_timeout=0)  # must not raise
 
-    # Paused and resumed the affected partition.
+    # Paused the affected partition immediately — no blocking wait.
     paused = mock_consumer.pause.call_args.args[0]
     assert (paused[0].topic, paused[0].partition) == ("outbox.events", 2)
-    mock_consumer.resume.assert_called()
     # Sought back to the exact offset.
-    tp = mock_consumer.seek.call_args.args[0]
+    tp = mock_consumer.seek.call_args_list[0].args[0]
     assert (tp.topic, tp.partition, tp.offset) == ("outbox.events", 2, 7)
-    # Waited the provider-suggested retry_after (jitter patched to 0).
-    mock_sleep.assert_called_once_with(5.0)
+    # Resumed only once the fake clock crossed the retry_after deadline.
+    mock_consumer.resume.assert_called()
+    # Never blocked on a real/fake sleep.
+    mock_sleep.assert_not_called()
     # Backpressure is not the message's fault: never committed => no data loss.
     mock_consumer.commit.assert_not_called()
+
+
+@patch("fraud_companion.adapters.kafka.consumer.time.sleep")
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_backpressure_never_calls_time_sleep(
+    mock_consumer_cls, _mock_uniform, mock_sleep, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        topic="outbox.events",
+        partition=0,
+        offset=1,
+    )
+    mock_consumer.poll.return_value = msg
+
+    fake_clock = _FakeClock()
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        if checks["n"] in (2, 3):
+            fake_clock.advance(100.0)  # always well past any computed delay
+        return checks["n"] > 3
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=AgentRateLimitedError("429", retry_after=5.0),
+    ):
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent, clock=fake_clock)
+        consumer.run(should_stop=stop, poll_timeout=0)  # must not raise
+
+    mock_sleep.assert_not_called()
+
+
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_backpressure_pauses_partition_without_blocking_other_partitions(
+    mock_consumer_cls, _mock_uniform, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg_tp0 = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope("case-tp0")).encode("utf-8"),
+        topic="outbox.events",
+        partition=0,
+        offset=1,
+    )
+    msg_tp1 = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope("case-tp1")).encode("utf-8"),
+        topic="outbox.events",
+        partition=1,
+        offset=1,
+    )
+    mock_consumer.poll.side_effect = [msg_tp0, msg_tp1]
+
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        return checks["n"] > 2
+
+    def handle_side_effect(envelope, agent, metrics):
+        if envelope["payload"]["caseId"] == "case-tp0":
+            raise AgentRateLimitedError("429", retry_after=5.0)
+        return HandleResult.PROCESSED
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=handle_side_effect,
+    ):
+        consumer = OutboxConsumer(
+            settings=_retry_settings(), agent=fake_agent, clock=_FakeClock()
+        )
+        consumer.run(should_stop=stop, poll_timeout=0)
+
+    # tp0 stayed paused and uncommitted; tp1 was processed and committed —
+    # proving tp0's backpressure never head-of-line-blocks other partitions.
+    mock_consumer.commit.assert_called_once_with(msg_tp1)
+    paused = mock_consumer.pause.call_args.args[0]
+    assert (paused[0].topic, paused[0].partition) == ("outbox.events", 0)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.random.uniform", return_value=0.0)
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_backpressure_resumes_and_reprocesses_after_clock_elapses(
+    mock_consumer_cls, _mock_uniform, fake_agent
+):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(_case_created_envelope()).encode("utf-8"),
+        topic="outbox.events",
+        partition=0,
+        offset=1,
+    )
+    mock_consumer.poll.return_value = msg
+
+    resumed = {"v": False}
+
+    def resume_side_effect(tps):
+        resumed["v"] = True
+
+    mock_consumer.resume.side_effect = resume_side_effect
+
+    def handle_side_effect(envelope, agent, metrics):
+        if not resumed["v"]:
+            raise AgentRateLimitedError("429", retry_after=5.0)
+        return HandleResult.PROCESSED
+
+    fake_clock = _FakeClock()
+    checks = {"n": 0}
+
+    def stop() -> bool:
+        checks["n"] += 1
+        if checks["n"] == 3:
+            fake_clock.advance(10.0)  # past the 5.0s retry_after deadline
+        return checks["n"] > 3
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        side_effect=handle_side_effect,
+    ):
+        consumer = OutboxConsumer(settings=_retry_settings(), agent=fake_agent, clock=fake_clock)
+        consumer.run(should_stop=stop, poll_timeout=0)
+
+    mock_consumer.resume.assert_called_once()
+    # Reprocessed at the same (seeked-back) offset once resumed.
+    mock_consumer.commit.assert_called_once_with(msg)
 
 
 @patch("fraud_companion.adapters.kafka.consumer.time.sleep")
@@ -532,11 +725,12 @@ def test_unavailable_uses_exponential_backoff_when_no_retry_after(
     )
     mock_consumer.poll.return_value = msg
 
+    fake_clock = _FakeClock()
     checks = {"n": 0}
 
     def stop() -> bool:
         checks["n"] += 1
-        return checks["n"] > 2  # two backpressure iterations
+        return checks["n"] > 2  # two backpressure iterations; clock never advances
 
     with patch(
         "fraud_companion.adapters.kafka.consumer.handle_case_created",
@@ -545,11 +739,19 @@ def test_unavailable_uses_exponential_backoff_when_no_retry_after(
         consumer = OutboxConsumer(
             settings=_retry_settings(kafka_retry_backoff_seconds=2.0),
             agent=fake_agent,
+            clock=fake_clock,
         )
         consumer.run(should_stop=stop, poll_timeout=0)
 
-    # base * 2^(attempt-1): 2 then 4 (jitter patched to 0).
-    assert [c.args[0] for c in mock_sleep.call_args_list] == [2.0, 4.0]
+    # base * 2^(attempt-1): 2 then 4 (jitter patched to 0). The clock never
+    # advances, so the final recorded resume_at reflects the second attempt's
+    # delay relative to the (unchanged) clock reading: 0 + 4.0.
+    key = ("outbox.events", 0)
+    resume_at, offset = consumer._paused_until[key]
+    assert resume_at == 4.0
+    assert offset == 3
+    # No blocking sleep anywhere on the backpressure path.
+    mock_sleep.assert_not_called()
 
 
 @patch("fraud_companion.adapters.kafka.consumer.time.sleep")

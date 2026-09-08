@@ -30,7 +30,7 @@ import json
 import logging
 import random
 import time
-from typing import Any
+from typing import Any, Callable
 
 from confluent_kafka import Consumer, KafkaError, Message, TopicPartition
 
@@ -110,10 +110,12 @@ class OutboxConsumer:
         settings: Settings,
         agent: Any,
         metrics: MetricsSink = NoOpMetricsSink(),
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._agent = agent
         self._metrics = metrics
+        self._clock = clock
         conf = {
             "bootstrap.servers": settings.kafka_bootstrap_servers,
             "group.id": settings.kafka_group_id,
@@ -126,6 +128,9 @@ class OutboxConsumer:
         # error cannot redeliver forever.
         self._delivery_attempts: dict[tuple[str, int, int], int] = {}
         self._backpressure_attempts: dict[tuple[str, int, int], int] = {}
+        # Non-blocking circuit breaker bookkeeping: (topic, partition) ->
+        # (resume_at monotonic timestamp, uncommitted offset to seek back to).
+        self._paused_until: dict[tuple[str, int], tuple[float, int]] = {}
 
     def process_message(self, msg: Message) -> None:
         """Handle a single already-polled, error-free Kafka message.
@@ -201,6 +206,7 @@ class OutboxConsumer:
         stop = should_stop or _default_stop
 
         while not stop():
+            self._resume_elapsed_partitions()
             msg = self._consumer.poll(poll_timeout)
             if msg is None:
                 continue
@@ -225,6 +231,24 @@ class OutboxConsumer:
                 # Success: clear any retry bookkeeping for this offset.
                 self._delivery_attempts.pop(key, None)
                 self._backpressure_attempts.pop(key, None)
+
+    def _resume_elapsed_partitions(self) -> None:
+        """Resume any partition whose backpressure pause deadline has elapsed.
+
+        Called at the top of each ``run()`` iteration, before ``poll()``, so
+        a partition parked by ``_on_provider_backpressure`` is re-enabled
+        without ever blocking the loop on a sleep.
+        """
+        now = self._clock()
+        elapsed = [
+            key for key, (resume_at, _offset) in self._paused_until.items()
+            if resume_at <= now
+        ]
+        for topic, partition in elapsed:
+            resume_at, offset = self._paused_until.pop((topic, partition))
+            tp = TopicPartition(topic, partition)
+            self._consumer.resume([tp])
+            self._consumer.seek(TopicPartition(topic, partition, offset))
 
     def _on_provider_backpressure(
         self, msg: Message, key: tuple[str, int, int], exc: Exception
@@ -282,11 +306,13 @@ class OutboxConsumer:
             type(exc).__name__, msg.key(), topic, partition, offset, delay, attempts,
         )
 
+        self._paused_until[(topic, partition)] = (self._clock() + delay, offset)
         affected = TopicPartition(topic, partition)
         self._consumer.pause([affected])
         self._consumer.seek(TopicPartition(topic, partition, offset))
-        time.sleep(delay)
-        self._consumer.resume([affected])
+        # No blocking wait: control returns to the poll loop immediately, and
+        # `_resume_elapsed_partitions()` resumes this partition once the
+        # recorded deadline elapses — other partitions keep flowing meanwhile.
 
     def _backpressure_delay(self, exc: Exception, attempts: int) -> float:
         """Seconds to wait before retrying under provider backpressure.
