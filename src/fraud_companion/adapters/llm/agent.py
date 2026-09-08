@@ -26,7 +26,7 @@ installed packages before writing this module:
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Callable
 
 from google.genai.errors import APIError
 from langchain.agents import create_agent
@@ -51,12 +51,31 @@ from fraud_companion.domain.policy import SECURITY_SYSTEM_PROMPT
 
 _RETRY_DELAY_RE = re.compile(r"(?P<seconds>\d+(?:\.\d+)?)s")
 
+#: Independent, upstream-facing safeguard applied at parse time so a
+#: malformed/absurd provider hint can never propagate an unbounded wait.
+#: This does NOT replace the consumer's own backpressure cap
+#: (``_backpressure_delay``'s existing 60s ceiling); it is a second,
+#: earlier line of defense.
+_MAX_RETRY_AFTER_SECONDS = 60.0
+
+
+class UnsupportedProviderError(ValueError):
+    """Raised when ``settings.llm_provider`` has no registered builder."""
+
+    def __init__(self, provider: str, registered: "list[str]") -> None:
+        choices = ", ".join(sorted(registered))
+        super().__init__(
+            f"Unsupported LLM provider {provider!r}; registered providers: {choices}"
+        )
+        self.provider = provider
+
 
 def _extract_retry_after(exc: APIError) -> float | None:
     """Best-effort parse of a Gemini 429 ``RetryInfo.retryDelay`` (e.g. "17s").
 
     Never raises: any unexpected shape yields ``None`` so the caller falls
-    back to its own backoff.
+    back to its own backoff. The parsed value is clamped to
+    ``_MAX_RETRY_AFTER_SECONDS`` before being returned.
     """
     details = getattr(exc, "details", None)
     if isinstance(details, dict):
@@ -71,7 +90,7 @@ def _extract_retry_after(exc: APIError) -> float | None:
         if isinstance(delay, str):
             match = _RETRY_DELAY_RE.fullmatch(delay.strip())
             if match:
-                return float(match.group("seconds"))
+                return min(float(match.group("seconds")), _MAX_RETRY_AFTER_SECONDS)
     return None
 
 
@@ -108,14 +127,15 @@ class GeminiAgent:
             raise _translate_api_error(exc) from exc
 
 
-def build_agent(settings: Settings, http_client: AntiFraudHttpClient) -> GeminiAgent:
+def _build_gemini_agent(settings: Settings, http_client: AntiFraudHttpClient) -> GeminiAgent:
     """Build the compiled Gemini agent graph.
 
     Wires the 4 allow-listed tools bound to ``http_client``, the tool
     allow-list guardrail (layer 1, as middleware), and the security
     system prompt. Returns the compiled LangGraph runnable from
     ``create_agent`` — callers invoke/stream it, they never touch the
-    model or the tool node directly.
+    model or the tool node directly. ``ChatGoogleGenerativeAI`` is
+    confined to this builder only.
     """
     model = ChatGoogleGenerativeAI(
         model=settings.llm_model,
@@ -140,3 +160,24 @@ def build_agent(settings: Settings, http_client: AntiFraudHttpClient) -> GeminiA
         middleware=[guardrail_middleware],
     )
     return GeminiAgent(compiled)
+
+
+_PROVIDER_BUILDERS: dict[
+    str, Callable[[Settings, AntiFraudHttpClient], GeminiAgent]
+] = {
+    "gemini": _build_gemini_agent,
+}
+
+
+def build_agent(settings: Settings, http_client: AntiFraudHttpClient) -> GeminiAgent:
+    """Dispatch to the provider-specific builder keyed by ``settings.llm_provider``.
+
+    Raises ``UnsupportedProviderError`` for an unregistered provider; no
+    agent is constructed in that case.
+    """
+    builder = _PROVIDER_BUILDERS.get(settings.llm_provider)
+    if builder is None:
+        raise UnsupportedProviderError(
+            settings.llm_provider, list(_PROVIDER_BUILDERS)
+        )
+    return builder(settings, http_client)

@@ -216,6 +216,22 @@ def test_only_legacy_google_api_key_fails_loud(monkeypatch):
     assert "LLM_API_KEY" in str(exc_info.value)
 
 
+def test_llm_provider_defaults_to_gemini(monkeypatch):
+    _set_env(monkeypatch)
+
+    settings = Settings.from_env()
+
+    assert settings.llm_provider == "gemini"
+
+
+def test_llm_provider_can_be_overridden(monkeypatch):
+    _set_env(monkeypatch, overrides={"LLM_PROVIDER": "gemini"})
+
+    settings = Settings.from_env()
+
+    assert settings.llm_provider == "gemini"
+
+
 def test_repr_never_leaks_secret_values(monkeypatch):
     _set_env(monkeypatch)
 

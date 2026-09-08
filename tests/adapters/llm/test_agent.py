@@ -14,7 +14,12 @@ import pytest
 from google.genai.errors import APIError
 
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
-from fraud_companion.adapters.llm.agent import GeminiAgent, build_agent
+from fraud_companion.adapters.llm.agent import (
+    GeminiAgent,
+    UnsupportedProviderError,
+    _extract_retry_after,
+    build_agent,
+)
 from fraud_companion.application.agent_port import (
     AgentRateLimitedError,
     AgentUnavailableError,
@@ -185,3 +190,75 @@ class TestGeminiAgentErrorTranslation:
         compiled.invoke.side_effect = APIError(400, {})
         with pytest.raises(APIError):
             GeminiAgent(compiled).invoke({})
+
+
+class TestProviderSelection:
+    def test_default_gemini_provider_builds_agent(
+        self, settings: Settings, http_client: MagicMock
+    ) -> None:
+        with patch("fraud_companion.adapters.llm.agent.ChatGoogleGenerativeAI"), patch(
+            "fraud_companion.adapters.llm.agent.create_agent"
+        ) as mock_create_agent:
+            result = build_agent(settings, http_client)
+
+        mock_create_agent.assert_called_once()
+        assert isinstance(result, GeminiAgent)
+
+    def test_explicit_gemini_provider_builds_agent(
+        self, settings: Settings, http_client: MagicMock
+    ) -> None:
+        from dataclasses import replace
+
+        gemini_settings = replace(settings, llm_provider="gemini")
+        with patch("fraud_companion.adapters.llm.agent.ChatGoogleGenerativeAI"), patch(
+            "fraud_companion.adapters.llm.agent.create_agent"
+        ) as mock_create_agent:
+            result = build_agent(gemini_settings, http_client)
+
+        mock_create_agent.assert_called_once()
+        assert isinstance(result, GeminiAgent)
+
+    def test_unsupported_provider_raises_and_builds_nothing(
+        self, settings: Settings, http_client: MagicMock
+    ) -> None:
+        from dataclasses import replace
+
+        bad_settings = replace(settings, llm_provider="openai")
+        with patch("fraud_companion.adapters.llm.agent.ChatGoogleGenerativeAI") as mock_model_cls, patch(
+            "fraud_companion.adapters.llm.agent.create_agent"
+        ) as mock_create_agent:
+            with pytest.raises(UnsupportedProviderError, match="openai"):
+                build_agent(bad_settings, http_client)
+
+        mock_model_cls.assert_not_called()
+        mock_create_agent.assert_not_called()
+
+
+class TestRetryAfterClamp:
+    def _api_error_with_retry_delay(self, delay: str) -> APIError:
+        return APIError(
+            429,
+            {
+                "error": {
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [
+                        {
+                            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                            "retryDelay": delay,
+                        }
+                    ],
+                }
+            },
+        )
+
+    def test_normal_retry_after_passes_through(self) -> None:
+        exc = self._api_error_with_retry_delay("17s")
+        assert _extract_retry_after(exc) == 17.0
+
+    def test_absurdly_large_retry_after_is_clamped(self) -> None:
+        exc = self._api_error_with_retry_delay("999999s")
+        assert _extract_retry_after(exc) == 60.0
+
+    def test_malformed_retry_after_yields_none(self) -> None:
+        exc = self._api_error_with_retry_delay("not-a-delay")
+        assert _extract_retry_after(exc) is None

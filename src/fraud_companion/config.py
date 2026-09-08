@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass, field
 
 DEFAULT_KAFKA_OUTBOX_TOPIC = "outbox.events"
+DEFAULT_LLM_PROVIDER = "gemini"
 DEFAULT_LLM_MODEL = "gemini-2.5-flash"
 #: Low temperature: the brief must be factual and reproducible, never creative.
 DEFAULT_LLM_TEMPERATURE = 0.2
@@ -112,6 +113,7 @@ class Settings:
     kafka_group_id: str
     kafka_organization_id: str
     kafka_outbox_topic: str = field(default=DEFAULT_KAFKA_OUTBOX_TOPIC)
+    llm_provider: str = field(default=DEFAULT_LLM_PROVIDER)
     llm_model: str = field(default=DEFAULT_LLM_MODEL)
     llm_temperature: float = field(default=DEFAULT_LLM_TEMPERATURE)
     llm_max_output_tokens: int = field(
@@ -147,6 +149,7 @@ class Settings:
             kafka_outbox_topic=source.get(
                 "KAFKA_OUTBOX_TOPIC", DEFAULT_KAFKA_OUTBOX_TOPIC
             ),
+            llm_provider=source.get("LLM_PROVIDER", DEFAULT_LLM_PROVIDER) or DEFAULT_LLM_PROVIDER,
             llm_model=source.get("LLM_MODEL", DEFAULT_LLM_MODEL),
             llm_temperature=_parse_temperature(
                 source.get("LLM_TEMPERATURE"),
