@@ -20,6 +20,12 @@ DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
 DEFAULT_KAFKA_MAX_DELIVERY_ATTEMPTS = 5
 DEFAULT_KAFKA_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_KAFKA_ON_EXHAUSTED = "crash"
+#: Metrics are enabled by default so observability comes "for free" unless
+#: explicitly opted out.
+DEFAULT_METRICS_ENABLED = True
+DEFAULT_METRICS_PORT = 9100
+_TRUTHY_TOKENS = frozenset({"true", "1", "yes"})
+_FALSY_TOKENS = frozenset({"false", "0", "no"})
 #: Supported terminal actions when a message exhausts its delivery attempts.
 #: "dead_letter" is intentionally NOT yet supported (needs a producer + DLQ
 #: topic); see docs/design/consumer-error-handling.md.
@@ -85,6 +91,20 @@ def _parse_temperature(raw: str | None, default: float, var_name: str) -> float:
     return value
 
 
+def _parse_bool(raw: str | None, default: bool, var_name: str) -> bool:
+    if raw is None or raw == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in _TRUTHY_TOKENS:
+        return True
+    if normalized in _FALSY_TOKENS:
+        return False
+    raise ValueError(
+        f"{var_name} must be one of "
+        f"{sorted(_TRUTHY_TOKENS | _FALSY_TOKENS)}, got {raw!r}"
+    )
+
+
 def _parse_on_exhausted(raw: str) -> str:
     if raw not in _ON_EXHAUSTED_CHOICES:
         choices = ", ".join(sorted(_ON_EXHAUSTED_CHOICES))
@@ -127,6 +147,8 @@ class Settings:
         default=DEFAULT_KAFKA_RETRY_BACKOFF_SECONDS
     )
     kafka_on_exhausted: str = field(default=DEFAULT_KAFKA_ON_EXHAUSTED)
+    metrics_enabled: bool = field(default=DEFAULT_METRICS_ENABLED)
+    metrics_port: int = field(default=DEFAULT_METRICS_PORT)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -178,6 +200,16 @@ class Settings:
             ),
             kafka_on_exhausted=_parse_on_exhausted(
                 source.get("KAFKA_ON_EXHAUSTED", DEFAULT_KAFKA_ON_EXHAUSTED)
+            ),
+            metrics_enabled=_parse_bool(
+                source.get("METRICS_ENABLED"),
+                DEFAULT_METRICS_ENABLED,
+                "METRICS_ENABLED",
+            ),
+            metrics_port=_parse_positive_int(
+                source.get("METRICS_PORT"),
+                DEFAULT_METRICS_PORT,
+                "METRICS_PORT",
             ),
         )
 

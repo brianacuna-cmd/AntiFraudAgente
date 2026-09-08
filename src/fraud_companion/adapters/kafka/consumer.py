@@ -39,6 +39,7 @@ from fraud_companion.application.agent_port import (
     AgentUnavailableError,
 )
 from fraud_companion.application.case_created_handler import handle_case_created
+from fraud_companion.application.metrics_port import MetricsSink, NoOpMetricsSink
 from fraud_companion.config import Settings
 from fraud_companion.domain.events import CASE_CREATED_EVENT
 
@@ -64,6 +65,22 @@ _BACKPRESSURE_MAX_ATTEMPTS = 20
 _PROVIDER_BACKPRESSURE_ERRORS = (AgentRateLimitedError, AgentUnavailableError)
 
 
+def _safe(fn: Any, *args: Any, **kwargs: Any) -> None:
+    """Call a metrics-sink method, swallowing any exception it raises.
+
+    Mirrors ``case_created_handler._safe``: metrics emission must never
+    propagate into ``process_message``'s existing retry/commit behaviour.
+    """
+    try:
+        fn(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - metrics emission must never fail the case
+        logger.warning("Metrics emission failed via %r; continuing.", fn)
+
+
+def _backpressure_kind(exc: Exception) -> str:
+    return "rate_limited" if isinstance(exc, AgentRateLimitedError) else "unavailable"
+
+
 def _decode_headers(headers: list[tuple[str, bytes]] | None) -> dict[str, str]:
     """Decode confluent-kafka's ``list[(key, bytes)]`` headers into a dict.
 
@@ -87,9 +104,16 @@ def _decode_headers(headers: list[tuple[str, bytes]] | None) -> dict[str, str]:
 class OutboxConsumer:
     """Consumes ``case.created`` events from the outbox topic."""
 
-    def __init__(self, *, settings: Settings, agent: Any) -> None:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        agent: Any,
+        metrics: MetricsSink = NoOpMetricsSink(),
+    ) -> None:
         self._settings = settings
         self._agent = agent
+        self._metrics = metrics
         conf = {
             "bootstrap.servers": settings.kafka_bootstrap_servers,
             "group.id": settings.kafka_group_id,
@@ -161,7 +185,7 @@ class OutboxConsumer:
         # A raised exception here propagates unchanged (no commit below),
         # so Kafka redelivers this message — at-least-once, and safe
         # because handle_case_created / put_agent_brief is idempotent.
-        handle_case_created(envelope, self._agent)
+        handle_case_created(envelope, self._agent, self._metrics)
 
         self._consumer.commit(msg)
 
@@ -219,6 +243,8 @@ class OutboxConsumer:
         topic, partition, offset = key
         attempts = self._backpressure_attempts.get(key, 0) + 1
         self._backpressure_attempts[key] = attempts
+        kind = _backpressure_kind(exc)
+        _safe(self._metrics.record_provider_error, kind=kind)
 
         if attempts > _BACKPRESSURE_MAX_ATTEMPTS:
             # A "transient" condition that never clears is not transient. Stop
@@ -233,9 +259,22 @@ class OutboxConsumer:
                 type(exc).__name__, msg.key(), _BACKPRESSURE_MAX_ATTEMPTS,
                 topic, partition, offset,
             )
+            _safe(
+                self._metrics.record_backpressure,
+                kind=kind, attempt=attempts, escalated=True,
+            )
+            # Consumer-only outcome: this exception path never reaches the
+            # handler's own record_case_outcome, so this is the sole emission
+            # point for this case's failure — never a duplicate.
+            _safe(self._metrics.record_case_outcome, "error")
             raise exc
 
         delay = self._backpressure_delay(exc, attempts)
+
+        _safe(
+            self._metrics.record_backpressure,
+            kind=kind, attempt=attempts, escalated=False,
+        )
 
         logger.warning(
             "LLM provider backpressure (%s) on key=%r; pausing %s[%d] and "
@@ -280,6 +319,10 @@ class OutboxConsumer:
 
         if attempts >= self._settings.kafka_max_delivery_attempts:
             self._delivery_attempts.pop(key, None)
+            # Consumer-only outcome: exhaustion never reaches the handler's own
+            # record_case_outcome (the handler already raised), so this is the
+            # sole emission point for this case's failure — never a duplicate.
+            _safe(self._metrics.record_case_outcome, "error")
             if self._settings.kafka_on_exhausted == "skip":
                 logger.critical(
                     "Message (key=%r, %s[%d]@%d) failed %d attempts; skipping "
