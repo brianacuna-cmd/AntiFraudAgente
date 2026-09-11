@@ -164,6 +164,26 @@ class TestPutAgentBriefTool:
         assert schema.model_fields["case_id"].is_required()
         assert schema.model_fields["brief"].is_required()
 
+    def test_is_a_terminal_tool(self, http_client: MagicMock) -> None:
+        tool = build_put_agent_brief_tool(http_client)
+        assert tool.return_direct is True
+
+
+class TestReturnDirectFlagsAcrossTools:
+    """Only put_agent_brief is terminal; the three read tools are not."""
+
+    def test_get_analysis_pack_is_not_terminal(self, http_client: MagicMock) -> None:
+        tool = build_get_analysis_pack_tool(http_client)
+        assert not tool.return_direct
+
+    def test_list_cases_is_not_terminal(self, http_client: MagicMock) -> None:
+        tool = build_list_cases_tool(http_client)
+        assert not tool.return_direct
+
+    def test_list_aml_alerts_is_not_terminal(self, http_client: MagicMock) -> None:
+        tool = build_list_aml_alerts_tool(http_client)
+        assert not tool.return_direct
+
 
 class TestListCasesTool:
     def test_name_matches_allow_list(self, http_client: MagicMock) -> None:
