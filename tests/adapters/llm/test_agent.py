@@ -12,13 +12,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from google.genai.errors import APIError
+from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
+from fraud_companion.adapters.http.errors import CaseClosedError
 from fraud_companion.adapters.llm.agent import (
     GeminiAgent,
     UnsupportedProviderError,
     _extract_retry_after,
     build_agent,
+)
+from fraud_companion.adapters.llm.tools import (
+    build_get_analysis_pack_tool,
+    build_put_agent_brief_tool,
 )
 from fraud_companion.application.agent_port import (
     AgentRateLimitedError,
@@ -262,3 +271,162 @@ class TestRetryAfterClamp:
     def test_malformed_retry_after_yields_none(self) -> None:
         exc = self._api_error_with_retry_delay("not-a-delay")
         assert _extract_retry_after(exc) is None
+
+
+class _ScriptedModel(BaseChatModel):
+    """Fake chat model that returns pre-scripted ``AIMessage`` replies in
+    order, one per invocation, and counts how many times it was invoked.
+
+    Mirrors the ``_ToolCallOnceModel`` pattern from
+    ``tests/application/test_case_created_handler_agent.py`` but supports a
+    second scripted turn so tests can prove whether the graph loops back to
+    the model after a tool's ToolMessage.
+    """
+
+    replies: list[AIMessage]
+    call_count: list[int] = [0]
+
+    def bind_tools(self, tools, **kwargs):  # create_agent binds tools; ignore them
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        index = self.call_count[0]
+        self.call_count[0] += 1
+        ai = self.replies[index]
+        return ChatResult(generations=[ChatGeneration(message=ai)])
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-model"
+
+
+def _put_agent_brief_tool_call() -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "put_agent_brief",
+                "args": {"case_id": "case-1", "brief": "drafted brief"},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _get_analysis_pack_tool_call() -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "get_analysis_pack",
+                "args": {"case_id": "case-1"},
+                "id": "call-1",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+class TestPutAgentBriefTerminatesTheRun:
+    """R2/Scenario 2/3: return_direct=True on put_agent_brief must stop the
+    ReAct loop right after its ToolMessage — no confirmation model round."""
+
+    def test_run_ends_at_put_agent_brief_tool_message_on_success(self) -> None:
+        http_client = MagicMock(spec=AntiFraudHttpClient)
+        http_client.put.return_value = {
+            "id": "case-1",
+            "status": "OPEN",
+            "agentBrief": "drafted brief",
+        }
+        model = _ScriptedModel(
+            replies=[
+                _put_agent_brief_tool_call(),
+                AIMessage(content="brief saved"),
+            ],
+            call_count=[0],
+        )
+        agent = create_agent(
+            model=model,
+            tools=[
+                build_get_analysis_pack_tool(http_client),
+                build_put_agent_brief_tool(http_client),
+            ],
+        )
+
+        result = agent.invoke({"messages": [("human", "handle case-1")]})
+
+        messages = result["messages"]
+        last_message = messages[-1]
+        assert last_message.__class__.__name__ == "ToolMessage"
+        assert getattr(last_message, "name", None) == "put_agent_brief"
+        assert model.call_count[0] == 1
+        assert not any(
+            m.__class__.__name__ == "AIMessage" and m.content == "brief saved"
+            for m in messages
+        )
+
+    def test_run_ends_at_put_agent_brief_tool_message_on_terminal_error(self) -> None:
+        http_client = MagicMock(spec=AntiFraudHttpClient)
+        http_client.put.side_effect = CaseClosedError(
+            status=409, code="CASE_CLOSED", message="closed"
+        )
+        model = _ScriptedModel(
+            replies=[
+                _put_agent_brief_tool_call(),
+                AIMessage(content="brief saved"),
+            ],
+            call_count=[0],
+        )
+        agent = create_agent(
+            model=model,
+            tools=[
+                build_get_analysis_pack_tool(http_client),
+                build_put_agent_brief_tool(http_client),
+            ],
+        )
+
+        # put_agent_brief's HTTP error is not a ToolInvocationError, so it
+        # propagates out of the graph rather than becoming an error-status
+        # ToolMessage (matches production ToolNode's default error handling,
+        # unchanged by this feature). The run still terminates immediately
+        # after the single tool call — the model is never invoked a second
+        # time to "confirm" the failure, exactly like the success path.
+        with pytest.raises(CaseClosedError):
+            agent.invoke({"messages": [("human", "handle case-1")]})
+
+        assert model.call_count[0] == 1
+
+    def test_read_only_tool_still_loops_back_to_the_model(self) -> None:
+        """Regression (Scenario 4): get_analysis_pack has no return_direct,
+        so the graph must still call the model a second time after it."""
+        http_client = MagicMock(spec=AntiFraudHttpClient)
+        http_client.get.return_value = {
+            "case": {"id": "case-1"},
+            "timeline": [],
+            "snapshot": {"hits": []},
+            "amlAlerts": [],
+            "relatedCases": [],
+            "agentBrief": None,
+        }
+        model = _ScriptedModel(
+            replies=[
+                _get_analysis_pack_tool_call(),
+                AIMessage(content="final answer"),
+            ],
+            call_count=[0],
+        )
+        agent = create_agent(
+            model=model,
+            tools=[
+                build_get_analysis_pack_tool(http_client),
+                build_put_agent_brief_tool(http_client),
+            ],
+        )
+
+        result = agent.invoke({"messages": [("human", "handle case-1")]})
+
+        last_message = result["messages"][-1]
+        assert last_message.__class__.__name__ == "AIMessage"
+        assert last_message.content == "final answer"
+        assert model.call_count[0] == 2

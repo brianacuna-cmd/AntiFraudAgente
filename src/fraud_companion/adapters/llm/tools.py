@@ -132,6 +132,7 @@ def build_put_agent_brief_tool(http_client: AntiFraudHttpClient) -> StructuredTo
         name="put_agent_brief",
         description=_PUT_AGENT_BRIEF_DESCRIPTION,
         args_schema=PutAgentBriefArgs,
+        return_direct=True,
     )
 
 
