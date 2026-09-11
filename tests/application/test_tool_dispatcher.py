@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from fraud_companion.application.tool_dispatcher import assert_dispatch_allowed
-from fraud_companion.domain.tools_spec import ALLOWED_TOOLS, DisallowedToolError
+from fraud_companion.domain.tools_spec import AUTHORING_TOOLS, ALLOWED_TOOLS, DisallowedToolError
 
 ALLOWED_NAMES = [
     "get_analysis_pack",
@@ -41,6 +41,17 @@ def test_allows_each_allow_listed_tool(tool_name: str) -> None:
 def test_rejects_disallowed_tools(tool_name: str) -> None:
     with pytest.raises(DisallowedToolError):
         assert_dispatch_allowed(tool_name)
+
+
+@pytest.mark.parametrize("tool_name", AUTHORING_TOOLS)
+def test_allows_authoring_tools_when_authoring_set_passed(tool_name: str) -> None:
+    assert_dispatch_allowed(tool_name, allowed=AUTHORING_TOOLS)  # must not raise
+
+
+@pytest.mark.parametrize("tool_name", ALLOWED_NAMES)
+def test_rejects_case_tools_when_authoring_set_passed(tool_name: str) -> None:
+    with pytest.raises(DisallowedToolError):
+        assert_dispatch_allowed(tool_name, allowed=AUTHORING_TOOLS)
 
 
 def test_dispatcher_has_no_duplicated_allow_list_literal() -> None:

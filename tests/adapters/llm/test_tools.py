@@ -462,3 +462,34 @@ def test_all_four_tools_names_match_allowed_tools() -> None:
         build_list_aml_alerts_tool(http_client),
     ]
     assert {tool.name for tool in tools} == ALLOWED_TOOLS
+
+
+class TestGuardDispatchAllowedParam:
+    """Regression + new behavior for the ``allowed`` param on ``_guard_dispatch``."""
+
+    def test_default_allowed_still_enforces_case_tools(self) -> None:
+        from fraud_companion.adapters.llm.tools import _guard_dispatch
+
+        wrapped = _guard_dispatch("get_analysis_pack", lambda: "ok")
+        assert wrapped() == "ok"
+
+        wrapped_bad = _guard_dispatch("not_a_real_tool", lambda: "ok")
+        with pytest.raises(DisallowedToolError):
+            wrapped_bad()
+
+    def test_explicit_authoring_allowed_set_admits_authoring_names(self) -> None:
+        from fraud_companion.adapters.llm.tools import _guard_dispatch
+        from fraud_companion.domain.tools_spec import AUTHORING_TOOLS
+
+        wrapped = _guard_dispatch(
+            "create_scoring_rule_via_factor_scoring", lambda: "ok", allowed=AUTHORING_TOOLS
+        )
+        assert wrapped() == "ok"
+
+    def test_explicit_authoring_allowed_set_rejects_case_names(self) -> None:
+        from fraud_companion.adapters.llm.tools import _guard_dispatch
+        from fraud_companion.domain.tools_spec import AUTHORING_TOOLS
+
+        wrapped = _guard_dispatch("get_analysis_pack", lambda: "ok", allowed=AUTHORING_TOOLS)
+        with pytest.raises(DisallowedToolError):
+            wrapped()

@@ -15,21 +15,37 @@ ALLOWED_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+AUTHORING_TOOLS: frozenset[str] = frozenset(
+    {
+        "create_scoring_rule_via_factor_scoring",
+        "update_scoring_rule",
+        "activate_scoring_rule",
+        "list_scoring_rules",
+        "get_scoring_rule",
+        "simulate_scoring_rule",
+    }
+)
+
 
 class DisallowedToolError(ValueError):
-    """Raised when a tool name outside ALLOWED_TOOLS is invoked."""
+    """Raised when a tool name outside the allow-list in use is invoked."""
 
     def __init__(self, tool_name: str) -> None:
         super().__init__(f"Tool '{tool_name}' is not in the allow-list")
         self.tool_name = tool_name
 
 
-def is_tool_allowed(tool_name: str) -> bool:
-    """Return True only if ``tool_name`` is exactly one of the 4 allowed tools."""
-    return tool_name in ALLOWED_TOOLS
+def is_tool_allowed(tool_name: str, allowed: frozenset[str] = ALLOWED_TOOLS) -> bool:
+    """Return True only if ``tool_name`` is a member of ``allowed``.
+
+    Defaults to the case-analyst ``ALLOWED_TOOLS`` set so every existing
+    call-site is unchanged. Pass ``allowed=AUTHORING_TOOLS`` (or any other
+    frozenset) to check membership against a different allow-list.
+    """
+    return tool_name in allowed
 
 
-def assert_tool_allowed(tool_name: str) -> None:
-    """Raise DisallowedToolError if ``tool_name`` is not allow-listed."""
-    if not is_tool_allowed(tool_name):
+def assert_tool_allowed(tool_name: str, allowed: frozenset[str] = ALLOWED_TOOLS) -> None:
+    """Raise DisallowedToolError if ``tool_name`` is not in ``allowed``."""
+    if not is_tool_allowed(tool_name, allowed=allowed):
         raise DisallowedToolError(tool_name)
