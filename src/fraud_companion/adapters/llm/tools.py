@@ -103,12 +103,25 @@ class ListAmlAlertsArgs(BaseModel):
     offset: int = Field(0, ge=0, description="Pagination offset.")
 
 
+def fetch_framed_analysis_pack(http_client: AntiFraudHttpClient, case_id: str) -> str:
+    """Fetch, trim, and untrusted-frame the analysis pack for ``case_id``.
+
+    Shared by the ``get_analysis_pack`` tool path AND the server-side
+    pre-fetch path (``application.case_created_handler``) so both produce
+    byte-identical framed output from the same single composition — the
+    only Layer-1 untrusted-data defense, never duplicated or forked.
+    May raise ``ApiError`` subtypes (e.g. ``CaseNotFoundError``,
+    ``CaseClosedError``) from the underlying HTTP call.
+    """
+    pack = http_client.get(f"/cases/{case_id}/analysis-pack")
+    return frame_untrusted_pack(json.dumps(trim_analysis_pack(pack)))
+
+
 def build_get_analysis_pack_tool(http_client: AntiFraudHttpClient) -> StructuredTool:
     """Build the read-only ``get_analysis_pack`` StructuredTool."""
 
     def _get_analysis_pack(case_id: str) -> str:
-        pack = http_client.get(f"/cases/{case_id}/analysis-pack")
-        return frame_untrusted_pack(json.dumps(trim_analysis_pack(pack)))
+        return fetch_framed_analysis_pack(http_client, case_id)
 
     return StructuredTool.from_function(
         func=_guard_dispatch("get_analysis_pack", _get_analysis_pack),

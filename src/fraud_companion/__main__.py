@@ -12,6 +12,7 @@ raw event payload.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import signal
 from typing import Callable
@@ -21,6 +22,7 @@ from prometheus_client import start_http_server
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
 from fraud_companion.adapters.kafka.consumer import OutboxConsumer
 from fraud_companion.adapters.llm.agent import build_agent
+from fraud_companion.adapters.llm.tools import fetch_framed_analysis_pack
 from fraud_companion.adapters.metrics.prometheus_sink import PrometheusMetricsSink
 from fraud_companion.application.metrics_port import MetricsSink, NoOpMetricsSink
 from fraud_companion.config import Settings
@@ -116,7 +118,10 @@ def main(
     )
     agent = build_agent(settings, http_client)
     metrics = build_metrics_sink(settings)
-    consumer = OutboxConsumer(settings=settings, agent=agent, metrics=metrics)
+    pack_fetcher = functools.partial(fetch_framed_analysis_pack, http_client)
+    consumer = OutboxConsumer(
+        settings=settings, agent=agent, metrics=metrics, pack_fetcher=pack_fetcher
+    )
 
     stop = should_stop
     if stop is None:

@@ -17,10 +17,15 @@ from fraud_companion.adapters.llm.tools import (
     build_list_aml_alerts_tool,
     build_list_cases_tool,
     build_put_agent_brief_tool,
+    fetch_framed_analysis_pack,
 )
 from fraud_companion.domain.analysis_pack import trim_analysis_pack
 from fraud_companion.domain.brief import BriefValidationError
-from fraud_companion.domain.policy import UNTRUSTED_PACK_CLOSE, UNTRUSTED_PACK_OPEN
+from fraud_companion.domain.policy import (
+    UNTRUSTED_PACK_CLOSE,
+    UNTRUSTED_PACK_OPEN,
+    frame_untrusted_pack,
+)
 from fraud_companion.domain.tools_spec import ALLOWED_TOOLS, DisallowedToolError
 
 
@@ -395,6 +400,55 @@ class TestGuardrailAndPortBoundariesUnchanged:
 
         for forbidden in ("genai", "google.generativeai", "langchain"):
             assert not any(forbidden in mod for mod in imported_modules)
+
+
+class TestFetchFramedAnalysisPack:
+    """Task 1: shared fetch+trim+frame fn used by both the pre-fetch path
+    and the get_analysis_pack tool path."""
+
+    def test_returns_trimmed_and_framed_pack(self, http_client: MagicMock) -> None:
+        pack = {
+            "case": {"id": "1"},
+            "timeline": [],
+            "snapshot": {
+                "hits": [
+                    {"points": 10, "because": "matched a known mule account"},
+                ]
+            },
+            "amlAlerts": [],
+            "relatedCases": [],
+            "agentBrief": None,
+        }
+        http_client.get.return_value = pack
+
+        result = fetch_framed_analysis_pack(http_client, "1")
+
+        assert result == frame_untrusted_pack(json.dumps(trim_analysis_pack(pack)))
+        http_client.get.assert_called_once_with("/cases/1/analysis-pack")
+
+    def test_tool_path_and_direct_path_are_byte_identical(
+        self, http_client: MagicMock
+    ) -> None:
+        pack = {
+            "case": {"id": "42"},
+            "timeline": [],
+            "snapshot": {
+                "hits": [
+                    {"points": 5, "because": "velocity anomaly"},
+                ]
+            },
+            "amlAlerts": [],
+            "relatedCases": [],
+            "agentBrief": None,
+        }
+        http_client.get.return_value = pack
+
+        tool = build_get_analysis_pack_tool(http_client)
+        tool_result = tool.invoke({"case_id": "42"})
+
+        direct_result = fetch_framed_analysis_pack(http_client, "42")
+
+        assert tool_result == direct_result
 
 
 def test_all_four_tools_names_match_allowed_tools() -> None:

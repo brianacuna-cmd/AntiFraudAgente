@@ -381,3 +381,102 @@ def test_handle_case_created_identical_outcome_with_noop_and_recording_sink() ->
     result_fake = handle_case_created(_envelope(), agent_b, metrics=_FakeMetricsSink())
 
     assert result_noop == result_fake
+
+
+class _RecordingFetchAgent(_FakeAgent):
+    """Records the order in which the fetcher and agent.invoke are called,
+    via a shared call-order list passed in by the test."""
+
+    def __init__(self, call_order: list[str], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._call_order = call_order
+
+    def invoke(self, input_: dict) -> dict:
+        self._call_order.append("agent.invoke")
+        return super().invoke(input_)
+
+
+class _FakeFetcher:
+    def __init__(
+        self,
+        pack: str = "<pack-content>",
+        raise_error: Exception | None = None,
+        call_order: list[str] | None = None,
+    ) -> None:
+        self.pack = pack
+        self.raise_error = raise_error
+        self.call_order = call_order
+        self.calls: list[str] = []
+
+    def __call__(self, case_id: str) -> str:
+        self.calls.append(case_id)
+        if self.call_order is not None:
+            self.call_order.append("fetcher")
+        if self.raise_error is not None:
+            raise self.raise_error
+        return self.pack
+
+
+def test_handle_case_created_calls_fetcher_once_before_agent_invoke() -> None:
+    call_order: list[str] = []
+    fetcher = _FakeFetcher(call_order=call_order)
+    agent = _RecordingFetchAgent(call_order)
+
+    result = handle_case_created(_envelope(), agent, pack_fetcher=fetcher)
+
+    assert result is HandleResult.PROCESSED
+    assert fetcher.calls == [CASE_ID]
+    assert call_order == ["fetcher", "agent.invoke"]
+
+
+def test_handle_case_created_injects_framed_pack_into_initial_message() -> None:
+    fetcher = _FakeFetcher(pack="<pack-content>")
+    agent = _FakeAgent()
+
+    handle_case_created(_envelope(), agent, pack_fetcher=fetcher)
+
+    assert len(agent.invocations) == 1
+    serialized = str(agent.invocations[0])
+    assert "<pack-content>" in serialized
+
+
+@pytest.mark.parametrize("error_cls", [CaseNotFoundError, CaseClosedError])
+def test_handle_case_created_fetcher_terminal_error_skips_without_invoke(error_cls) -> None:
+    error = error_cls(status=404, code="CASE_NOT_FOUND", message="not found")
+    fetcher = _FakeFetcher(raise_error=error)
+    agent = _FakeAgent()
+
+    result = handle_case_created(_envelope(), agent, pack_fetcher=fetcher)
+
+    assert result is HandleResult.SKIPPED_TERMINAL
+    assert agent.invocations == []
+
+
+def test_handle_case_created_fetcher_generic_error_propagates_without_invoke() -> None:
+    fetcher = _FakeFetcher(raise_error=RuntimeError("boom"))
+    agent = _FakeAgent()
+
+    with pytest.raises(RuntimeError):
+        handle_case_created(_envelope(), agent, pack_fetcher=fetcher)
+
+    assert agent.invocations == []
+
+
+def test_handle_case_created_pack_fetcher_none_preserves_legacy_message() -> None:
+    agent = _FakeAgent()
+
+    result = handle_case_created(_envelope(), agent, pack_fetcher=None)
+
+    assert result is HandleResult.PROCESSED
+    serialized = str(agent.invocations[0])
+    assert "Analyze it and draft the agent brief" in serialized
+
+
+def test_handle_case_created_single_model_round_on_success_with_fetcher() -> None:
+    fetcher = _FakeFetcher(pack="<pack-content>")
+    agent = _FakeAgent()
+
+    result = handle_case_created(_envelope(), agent, pack_fetcher=fetcher)
+
+    assert result is HandleResult.PROCESSED
+    assert len(agent.invocations) == 1
