@@ -119,7 +119,7 @@ def test_case_created_message_triggers_handler_and_commits(
         consumer = OutboxConsumer(settings=settings, agent=fake_agent)
         consumer.process_message(msg)
 
-    mock_handle.assert_called_once_with(envelope, fake_agent, consumer._metrics)
+    mock_handle.assert_called_once_with(envelope, fake_agent, consumer._metrics, consumer._pack_fetcher)
     mock_consumer.commit.assert_called_once_with(msg)
 
 
@@ -403,7 +403,7 @@ def test_matching_organization_id_processes_as_before(mock_consumer_cls, setting
         consumer = OutboxConsumer(settings=settings, agent=fake_agent)
         consumer.process_message(msg)
 
-    mock_handle.assert_called_once_with(envelope, fake_agent, consumer._metrics)
+    mock_handle.assert_called_once_with(envelope, fake_agent, consumer._metrics, consumer._pack_fetcher)
     mock_consumer.commit.assert_called_once_with(msg)
 
 
@@ -639,7 +639,7 @@ def test_backpressure_pauses_partition_without_blocking_other_partitions(
         checks["n"] += 1
         return checks["n"] > 2
 
-    def handle_side_effect(envelope, agent, metrics):
+    def handle_side_effect(envelope, agent, metrics, pack_fetcher=None):
         if envelope["payload"]["caseId"] == "case-tp0":
             raise AgentRateLimitedError("429", retry_after=5.0)
         return HandleResult.PROCESSED
@@ -684,7 +684,7 @@ def test_backpressure_resumes_and_reprocesses_after_clock_elapses(
 
     mock_consumer.resume.side_effect = resume_side_effect
 
-    def handle_side_effect(envelope, agent, metrics):
+    def handle_side_effect(envelope, agent, metrics, pack_fetcher=None):
         if not resumed["v"]:
             raise AgentRateLimitedError("429", retry_after=5.0)
         return HandleResult.PROCESSED
@@ -881,7 +881,7 @@ def test_backpressure_exhaustion_is_partition_scoped_no_process_crash(
         checks["n"] += 1
         return checks["n"] > 3
 
-    def handle_side_effect(envelope, agent, metrics):
+    def handle_side_effect(envelope, agent, metrics, pack_fetcher=None):
         if envelope["payload"]["caseId"] == "case-tp0":
             raise AgentRateLimitedError("429")
         return HandleResult.PROCESSED
@@ -1159,7 +1159,7 @@ def test_process_message_passes_metrics_into_handler(mock_consumer_cls, settings
         consumer = OutboxConsumer(settings=settings, agent=fake_agent, metrics=metrics)
         consumer.process_message(msg)
 
-    mock_handle.assert_called_once_with(envelope, fake_agent, metrics)
+    mock_handle.assert_called_once_with(envelope, fake_agent, metrics, None)
 
 
 @patch("fraud_companion.adapters.kafka.consumer.time.sleep")
@@ -1237,3 +1237,28 @@ def test_parked_partition_message_is_skipped_even_if_pause_is_ignored(
     assert mock_consumer.seek.called
     tp = mock_consumer.seek.call_args.args[0]
     assert (tp.topic, tp.partition, tp.offset) == ("outbox.events", 1, 9)
+
+
+@patch("fraud_companion.adapters.kafka.consumer.Consumer")
+def test_process_message_threads_pack_fetcher_into_handler(mock_consumer_cls, settings, fake_agent):
+    mock_consumer = MagicMock()
+    mock_consumer_cls.return_value = mock_consumer
+
+    envelope = _case_created_envelope()
+    msg = _FakeMessage(
+        headers=[("event_type", b"case.created"), ("organization_id", b"org-1")],
+        value=json.dumps(envelope).encode("utf-8"),
+    )
+    metrics = _FakeMetricsSink()
+    pack_fetcher = object()
+
+    with patch(
+        "fraud_companion.adapters.kafka.consumer.handle_case_created",
+        return_value=HandleResult.PROCESSED,
+    ) as mock_handle:
+        consumer = OutboxConsumer(
+            settings=settings, agent=fake_agent, metrics=metrics, pack_fetcher=pack_fetcher
+        )
+        consumer.process_message(msg)
+
+    mock_handle.assert_called_once_with(envelope, fake_agent, metrics, pack_fetcher)

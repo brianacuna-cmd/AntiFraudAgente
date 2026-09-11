@@ -33,6 +33,7 @@ from enum import Enum, auto
 from typing import Any
 
 from fraud_companion.adapters.http.errors import CaseClosedError, CaseNotFoundError
+from fraud_companion.application.analysis_pack_port import AnalysisPackFetcher
 from fraud_companion.application.metrics_port import MetricsSink, NoOpMetricsSink
 from fraud_companion.domain.events import CASE_CREATED_EVENT
 
@@ -202,6 +203,7 @@ def handle_case_created(
     event: dict[str, Any],
     agent: Any,
     metrics: MetricsSink = NoOpMetricsSink(),
+    pack_fetcher: AnalysisPackFetcher | None = None,
 ) -> HandleResult:
     """Handle one parsed ``case.created`` event envelope.
 
@@ -209,8 +211,20 @@ def handle_case_created(
     ``adapters.llm.agent.build_agent`` (or a compatible object exposing
     ``.invoke(dict) -> dict``, as LangGraph's ``create_agent`` result
     does). It is invoked once with an initial human message instructing
-    it to process the given caseId; the agent itself calls
-    ``get_analysis_pack`` and ``put_agent_brief``.
+    it to process the given caseId.
+
+    When ``pack_fetcher`` is ``None`` (default), the initial message does
+    not include the analysis pack and the agent is expected to self-fetch
+    via the ``get_analysis_pack`` tool (legacy two-round behaviour).
+
+    When ``pack_fetcher`` is provided, it is called exactly once for the
+    caseId BEFORE ``agent.invoke``, and its framed+trimmed pack content is
+    injected directly into the initial human message so the agent can go
+    straight to ``put_agent_brief`` (single model round). If the fetcher
+    raises a terminal error (``CaseNotFoundError``/``CaseClosedError``),
+    the case is reported ``SKIPPED_TERMINAL`` without ever invoking the
+    agent. Any other fetcher exception propagates unchanged (retryable),
+    also without invoking the agent.
 
     Returns a :class:`HandleResult` describing the outcome so the future
     Kafka consumer can decide whether to commit the offset.
@@ -245,21 +259,40 @@ def handle_case_created(
         )
         return HandleResult.SKIPPED_MALFORMED
 
-    try:
-        result = agent.invoke(
-            {
-                "messages": [
-                    (
-                        "human",
-                        (
-                            "A new fraud case has been created with "
-                            f"caseId={case_id}. Analyze it and draft the "
-                            "agent brief for this case."
-                        ),
-                    )
-                ]
-            }
+    if pack_fetcher is not None:
+        try:
+            framed_pack = pack_fetcher(case_id)
+        except _TERMINAL_ERROR_TYPES:
+            logger.info(
+                "Terminal outcome for caseId=%s: case not found or already "
+                "closed while pre-fetching the analysis pack; not retrying.",
+                case_id,
+            )
+            _safe(metrics.record_case_outcome, HandleResult.SKIPPED_TERMINAL.name)
+            return HandleResult.SKIPPED_TERMINAL
+        except Exception:
+            logger.warning(
+                "Retryable failure while pre-fetching the analysis pack for "
+                "caseId=%s; propagating for redelivery.",
+                case_id,
+            )
+            raise
+        human_message = (
+            "A new fraud case has been created with "
+            f"caseId={case_id}. The analysis pack is provided below between "
+            "untrusted-data markers; do NOT call get_analysis_pack, go "
+            "straight to drafting and writing the agent brief via "
+            f"put_agent_brief.\n\n{framed_pack}"
         )
+    else:
+        human_message = (
+            "A new fraud case has been created with "
+            f"caseId={case_id}. Analyze it and draft the "
+            "agent brief for this case."
+        )
+
+    try:
+        result = agent.invoke({"messages": [("human", human_message)]})
     except _TERMINAL_ERROR_TYPES:
         logger.info(
             "Terminal outcome for caseId=%s: case not found or already closed; "

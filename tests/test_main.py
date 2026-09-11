@@ -56,6 +56,8 @@ class TestMain:
             assert consumer_kwargs["settings"] is settings
             assert consumer_kwargs["agent"] is mock_build_agent.return_value
             assert isinstance(consumer_kwargs["metrics"], PrometheusMetricsSink)
+            assert consumer_kwargs["pack_fetcher"].func is entrypoint.fetch_framed_analysis_pack
+            assert consumer_kwargs["pack_fetcher"].args == (mock_client_cls.return_value,)
             mock_start_server.assert_called_once_with(
                 settings.metrics_port,
                 registry=consumer_kwargs["metrics"].registry,

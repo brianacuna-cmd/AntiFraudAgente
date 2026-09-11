@@ -39,6 +39,7 @@ from fraud_companion.application.agent_port import (
     AgentRateLimitedError,
     AgentUnavailableError,
 )
+from fraud_companion.application.analysis_pack_port import AnalysisPackFetcher
 from fraud_companion.application.case_created_handler import handle_case_created
 from fraud_companion.application.metrics_port import MetricsSink, NoOpMetricsSink
 from fraud_companion.config import Settings
@@ -115,11 +116,13 @@ class OutboxConsumer:
         agent: Any,
         metrics: MetricsSink = NoOpMetricsSink(),
         clock: Callable[[], float] = time.monotonic,
+        pack_fetcher: AnalysisPackFetcher | None = None,
     ) -> None:
         self._settings = settings
         self._agent = agent
         self._metrics = metrics
         self._clock = clock
+        self._pack_fetcher = pack_fetcher
         conf = {
             "bootstrap.servers": settings.kafka_bootstrap_servers,
             "group.id": settings.kafka_group_id,
@@ -194,7 +197,7 @@ class OutboxConsumer:
         # A raised exception here propagates unchanged (no commit below),
         # so Kafka redelivers this message — at-least-once, and safe
         # because handle_case_created / put_agent_brief is idempotent.
-        handle_case_created(envelope, self._agent, self._metrics)
+        handle_case_created(envelope, self._agent, self._metrics, self._pack_fetcher)
 
         self._consumer.commit(msg)
 
