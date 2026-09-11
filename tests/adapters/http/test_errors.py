@@ -9,6 +9,9 @@ from fraud_companion.adapters.http.errors import (
     CaseNotFoundError,
     ForbiddenCrossTenantError,
     ForbiddenRoleError,
+    InvariantViolationError,
+    ScoringRuleActiveError,
+    ScoringRuleNotFoundError,
     UnauthenticatedError,
     ValidationError,
     map_error_response,
@@ -113,3 +116,51 @@ def test_api_error_str_includes_status_and_code():
     exc = ApiError(status=500, code="X", message="boom", metadata={})
     assert "500" in str(exc)
     assert "X" in str(exc)
+
+
+def test_400_invariant_violation_maps_to_invariant_violation_error():
+    exc = map_error_response(
+        400,
+        {"error": {"code": "INVARIANT_VIOLATION", "message": "bad state", "metadata": {}}},
+    )
+    assert isinstance(exc, InvariantViolationError)
+    assert exc.status == 400
+    assert exc.code == "INVARIANT_VIOLATION"
+
+
+def test_404_scoring_rule_not_found_maps_to_scoring_rule_not_found_error():
+    exc = map_error_response(
+        404,
+        {"error": {"code": "SCORING_RULE_NOT_FOUND", "message": "no rule", "metadata": {}}},
+    )
+    assert isinstance(exc, ScoringRuleNotFoundError)
+    assert exc.status == 404
+    assert exc.code == "SCORING_RULE_NOT_FOUND"
+
+
+def test_409_scoring_rule_active_maps_to_scoring_rule_active_error():
+    exc = map_error_response(
+        409,
+        {"error": {"code": "SCORING_RULE_ACTIVE", "message": "active", "metadata": {}}},
+    )
+    assert isinstance(exc, ScoringRuleActiveError)
+    assert exc.status == 409
+    assert exc.code == "SCORING_RULE_ACTIVE"
+
+
+def test_403_forbidden_role_still_maps_correctly_regression():
+    exc = map_error_response(
+        403, {"error": {"code": "FORBIDDEN_ROLE", "message": "no role", "metadata": {}}}
+    )
+    assert isinstance(exc, ForbiddenRoleError)
+
+
+def test_new_scoring_errors_are_distinct_from_case_domain_errors():
+    for cls in (InvariantViolationError, ScoringRuleNotFoundError, ScoringRuleActiveError):
+        assert not issubclass(cls, CaseNotFoundError)
+        assert not issubclass(cls, CaseClosedError)
+        assert not issubclass(cls, ValidationError)
+    for cls in (CaseNotFoundError, CaseClosedError, ValidationError):
+        assert not issubclass(cls, InvariantViolationError)
+        assert not issubclass(cls, ScoringRuleNotFoundError)
+        assert not issubclass(cls, ScoringRuleActiveError)

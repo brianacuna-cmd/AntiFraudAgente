@@ -15,6 +15,7 @@ from fraud_companion.adapters.http.errors import (
     CaseNotFoundError,
     ForbiddenCrossTenantError,
     ForbiddenRoleError,
+    ScoringRuleNotFoundError,
     UnauthenticatedError,
     ValidationError,
 )
@@ -283,3 +284,108 @@ def test_error_body_nonstandard_shape_is_handled_gracefully(client: AntiFraudHtt
 
     assert exc_info.value.status == 400
     assert exc_info.value.code is None
+
+
+# --- post/patch (Slice 1: scoring-rule-authoring-tools) ---
+
+
+@respx.mock
+def test_post_sends_api_key_header_content_type_json_and_no_authorization(
+    client: AntiFraudHttpClient,
+):
+    route = respx.post(f"{BASE_URL}/api/v1/risk-scoring-rules/factor-scoring").mock(
+        return_value=httpx.Response(201, json={"id": "r1", "status": "INACTIVE"})
+    )
+
+    result = client.post(
+        "/risk-scoring-rules/factor-scoring", json_body={"name": "rule-1"}
+    )
+
+    assert result == {"id": "r1", "status": "INACTIVE"}
+    sent = route.calls.last.request
+    assert sent.headers["X-Agent-Api-Key"] == API_KEY
+    assert "Authorization" not in sent.headers
+    assert "application/json" in sent.headers["content-type"]
+
+
+@respx.mock
+def test_post_url_uses_api_v1_prefix_and_never_sends_organization_id(
+    client: AntiFraudHttpClient,
+):
+    route = respx.post(f"{BASE_URL}/api/v1/risk-scoring-rules/factor-scoring").mock(
+        return_value=httpx.Response(201, json={"id": "r1"})
+    )
+
+    client.post("/risk-scoring-rules/factor-scoring", json_body={"name": "rule-1"})
+
+    sent = route.calls.last.request
+    assert str(sent.url) == f"{BASE_URL}/api/v1/risk-scoring-rules/factor-scoring"
+    assert "organizationId" not in (sent.content.decode() if sent.content else "")
+    assert "organizationId" not in sent.headers
+    assert "organizationId" not in sent.url.params
+
+
+def test_post_forwards_configured_timeout_to_httpx():
+    client = AntiFraudHttpClient(base_url=BASE_URL, api_key=API_KEY, timeout=9.5)
+    with patch("fraud_companion.adapters.http.client.httpx.post") as mock_post:
+        mock_post.return_value = httpx.Response(201, json={})
+        client.post("/risk-scoring-rules/factor-scoring", json_body={"name": "x"})
+
+    _, kwargs = mock_post.call_args
+    assert kwargs["timeout"] == 9.5
+
+
+@respx.mock
+def test_patch_empty_body_200_returns_none(client: AntiFraudHttpClient):
+    respx.patch(f"{BASE_URL}/api/v1/risk-scoring-rules/r1").mock(
+        return_value=httpx.Response(200)
+    )
+
+    result = client.patch("/risk-scoring-rules/r1", json_body={"name": "New"})
+
+    assert result is None
+
+
+@respx.mock
+def test_patch_url_uses_api_v1_prefix_and_never_sends_organization_id(
+    client: AntiFraudHttpClient,
+):
+    route = respx.patch(f"{BASE_URL}/api/v1/risk-scoring-rules/r1").mock(
+        return_value=httpx.Response(200)
+    )
+
+    client.patch("/risk-scoring-rules/r1", json_body={"name": "New"})
+
+    sent = route.calls.last.request
+    assert str(sent.url) == f"{BASE_URL}/api/v1/risk-scoring-rules/r1"
+    assert "organizationId" not in (sent.content.decode() if sent.content else "")
+    assert "organizationId" not in sent.headers
+
+
+def test_patch_forwards_configured_timeout_to_httpx():
+    client = AntiFraudHttpClient(base_url=BASE_URL, api_key=API_KEY, timeout=6.0)
+    with patch("fraud_companion.adapters.http.client.httpx.patch") as mock_patch:
+        mock_patch.return_value = httpx.Response(200)
+        client.patch("/risk-scoring-rules/r1", json_body={"name": "New"})
+
+    _, kwargs = mock_patch.call_args
+    assert kwargs["timeout"] == 6.0
+
+
+@respx.mock
+def test_patch_404_scoring_rule_not_found_raises_typed_error(client: AntiFraudHttpClient):
+    respx.patch(f"{BASE_URL}/api/v1/risk-scoring-rules/r1").mock(
+        return_value=httpx.Response(
+            404,
+            json={
+                "error": {
+                    "code": "SCORING_RULE_NOT_FOUND",
+                    "message": "no rule",
+                    "metadata": {},
+                }
+            },
+        )
+    )
+
+    with pytest.raises(ScoringRuleNotFoundError):
+        client.patch("/risk-scoring-rules/r1", json_body={"name": "New"})

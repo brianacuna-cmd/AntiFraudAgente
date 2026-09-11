@@ -56,6 +56,18 @@ class ValidationError(ApiError):
     """400 validation failure."""
 
 
+class InvariantViolationError(ApiError):
+    """400 INVARIANT_VIOLATION — scoring-rule domain invariant broken."""
+
+
+class ScoringRuleNotFoundError(ApiError):
+    """404 SCORING_RULE_NOT_FOUND."""
+
+
+class ScoringRuleActiveError(ApiError):
+    """409 SCORING_RULE_ACTIVE — rule is already active."""
+
+
 _STATUS_CODE_MAP: dict[tuple[int, str], type[ApiError]] = {
     (401, "UNAUTHENTICATED"): UnauthenticatedError,
     (403, "FORBIDDEN_ROLE"): ForbiddenRoleError,
@@ -63,6 +75,9 @@ _STATUS_CODE_MAP: dict[tuple[int, str], type[ApiError]] = {
     (404, "CASE_NOT_FOUND"): CaseNotFoundError,
     (409, "CASE_CLOSED"): CaseClosedError,
     (400, "VALIDATION_ERROR"): ValidationError,
+    (400, "INVARIANT_VIOLATION"): InvariantViolationError,
+    (404, "SCORING_RULE_NOT_FOUND"): ScoringRuleNotFoundError,
+    (409, "SCORING_RULE_ACTIVE"): ScoringRuleActiveError,
 }
 
 
