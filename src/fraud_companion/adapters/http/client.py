@@ -63,6 +63,28 @@ class AntiFraudHttpClient:
         )
         return self._handle_response(response)
 
+    def post(self, path: str, json_body: Any) -> Any:
+        headers = self._headers()
+        headers["Content-Type"] = "application/json"
+        response = httpx.post(
+            self._url(path),
+            headers=headers,
+            json=json_body,
+            timeout=self._timeout,
+        )
+        return self._handle_response(response)
+
+    def patch(self, path: str, json_body: Any) -> Any:
+        headers = self._headers()
+        headers["Content-Type"] = "application/json"
+        response = httpx.patch(
+            self._url(path),
+            headers=headers,
+            json=json_body,
+            timeout=self._timeout,
+        )
+        return self._handle_response(response)
+
     @staticmethod
     def _handle_response(response: httpx.Response) -> Any:
         if response.status_code // 100 == 2:
