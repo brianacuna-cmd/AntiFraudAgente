@@ -14,7 +14,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from fraud_companion.adapters.llm.guardrail import build_tool_guardrail
-from fraud_companion.domain.tools_spec import ALLOWED_TOOLS, DisallowedToolError
+from fraud_companion.domain.tools_spec import AUTHORING_TOOLS, ALLOWED_TOOLS, DisallowedToolError
 
 ALLOWED_NAMES = [
     "get_analysis_pack",
@@ -66,6 +66,35 @@ def test_guardrail_delegates_allowed_tools_to_execute(tool_name: str) -> None:
 @pytest.mark.parametrize("tool_name", DISALLOWED_NAMES)
 def test_guardrail_rejects_disallowed_tools_without_executing(tool_name: str) -> None:
     wrap_tool_call = build_tool_guardrail()
+    request = _make_request(tool_name)
+
+    def execute(req: ToolCallRequest) -> ToolMessage:
+        raise AssertionError("execute() must not be called for a disallowed tool")
+
+    with pytest.raises(DisallowedToolError):
+        wrap_tool_call(request, execute)
+
+
+@pytest.mark.parametrize("tool_name", AUTHORING_TOOLS)
+def test_guardrail_delegates_authoring_tools_when_authoring_set_passed(tool_name: str) -> None:
+    wrap_tool_call = build_tool_guardrail(allowed=AUTHORING_TOOLS)
+    request = _make_request(tool_name)
+    sentinel = ToolMessage(content="ok", tool_call_id="call-1")
+    calls: list[ToolCallRequest] = []
+
+    def execute(req: ToolCallRequest) -> ToolMessage:
+        calls.append(req)
+        return sentinel
+
+    result = wrap_tool_call(request, execute)
+
+    assert result is sentinel
+    assert calls == [request]
+
+
+@pytest.mark.parametrize("tool_name", ALLOWED_NAMES)
+def test_guardrail_rejects_case_tools_when_authoring_set_passed(tool_name: str) -> None:
+    wrap_tool_call = build_tool_guardrail(allowed=AUTHORING_TOOLS)
     request = _make_request(tool_name)
 
     def execute(req: ToolCallRequest) -> ToolMessage:

@@ -19,26 +19,36 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
-from fraud_companion.application.tool_dispatcher import assert_dispatch_allowed
+from fraud_companion.application.tool_dispatcher import ALLOWED_TOOLS, assert_dispatch_allowed
 from fraud_companion.domain.analysis_pack import trim_analysis_pack
 from fraud_companion.domain.brief import Brief
 from fraud_companion.domain.policy import frame_untrusted_pack
 
 
-def _guard_dispatch(tool_name: str, func: Callable[..., Any]) -> Callable[..., Any]:
+def _guard_dispatch(
+    tool_name: str, func: Callable[..., Any], allowed: frozenset[str] = ALLOWED_TOOLS
+) -> Callable[..., Any]:
     """Wrap ``func`` so that, before doing anything else, it calls
-    :func:`assert_dispatch_allowed` for ``tool_name``.
+    :func:`assert_dispatch_allowed` for ``tool_name`` against ``allowed``.
 
     This is the application-level dispatcher guardrail (layer 2) wired
     directly into the real tool-execution path: even if the LangGraph
     ``wrap_tool_call`` middleware (layer 1) were bypassed or
     misconfigured, the tool body itself refuses to run under a
-    disallowed name.
+    disallowed name. Defaults to ``ALLOWED_TOOLS`` (the case-analyst set)
+    so every existing case tool builder is byte-unchanged; pass
+    ``allowed=AUTHORING_TOOLS`` for the authoring path.
     """
 
     @functools.wraps(func)
     def _wrapped(*args: Any, **kwargs: Any) -> Any:
-        assert_dispatch_allowed(tool_name)
+        if allowed is ALLOWED_TOOLS:
+            # Preserve the exact call signature of pre-existing case tool
+            # builders (byte-unchanged) so mocks asserting
+            # `assert_dispatch_allowed(<name>)` with no kwarg stay green.
+            assert_dispatch_allowed(tool_name)
+        else:
+            assert_dispatch_allowed(tool_name, allowed=allowed)
         return func(*args, **kwargs)
 
     return _wrapped
