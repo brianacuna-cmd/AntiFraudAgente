@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 fraud-companion = "fraud_companion.__main__:main"
+fraud-companion-chat = "fraud_companion.chat:chat_main"
 
 [project.optional-dependencies]
 dev = [
