@@ -3,8 +3,8 @@
 ``get_analysis_pack`` (read) and ``put_agent_brief`` (the sole write) are
 required. ``list_cases`` and ``list_aml_alerts`` are optional read tools
 the agent may use for extra chat context. All four are thin wrappers over
-``AntiFraudHttpClient``; they do not interpret, reshape, or invent data —
-that is the LLM's job.
+``AntiFraudHttpClient``. ``get_analysis_pack`` applies the domain trim
+then untrusted-data framing; it does not invent hit explanations.
 
 Tool names MUST match the entries in
 ``fraud_companion.domain.tools_spec.ALLOWED_TOOLS`` exactly.
@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from fraud_companion.adapters.http.client import AntiFraudHttpClient
 from fraud_companion.application.tool_dispatcher import assert_dispatch_allowed
+from fraud_companion.domain.analysis_pack import trim_analysis_pack
 from fraud_companion.domain.brief import Brief
 from fraud_companion.domain.policy import frame_untrusted_pack
 
@@ -46,8 +47,11 @@ _GET_ANALYSIS_PACK_DESCRIPTION = """\
 Fetch the full analysis pack for a case BEFORE writing an agent brief.
 
 Returns the case, its event timeline, the fraud-detection snapshot, AML
-alerts, related cases, and any existing agent brief, exactly as returned
-by the anti-fraud API — nothing is reshaped or reinterpreted.
+alerts, related cases, and any existing agent brief. Related cases are
+reduced to {id, score, hits}. Timeline events that only repeat the
+agentBrief or snapshot (AGENT_BRIEFING, SNAPSHOT_REFRESHED) are omitted.
+Business facts (provider, amount, wallet age, velocity, hits and their
+because text) are left intact. No because text is invented.
 
 The snapshot's `hits` explain WHY the case was flagged; treat their
 `points` as already-computed evidence and NEVER re-score or second-guess
@@ -104,7 +108,7 @@ def build_get_analysis_pack_tool(http_client: AntiFraudHttpClient) -> Structured
 
     def _get_analysis_pack(case_id: str) -> str:
         pack = http_client.get(f"/cases/{case_id}/analysis-pack")
-        return frame_untrusted_pack(json.dumps(pack))
+        return frame_untrusted_pack(json.dumps(trim_analysis_pack(pack)))
 
     return StructuredTool.from_function(
         func=_guard_dispatch("get_analysis_pack", _get_analysis_pack),
