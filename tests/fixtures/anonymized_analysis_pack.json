@@ -1,0 +1,245 @@
+{
+  "case": {
+    "id": "a1b2c3d4e5f60718293a0001",
+    "organizationId": "00000000000000000000aaaa",
+    "customerId": "cust-demo-001",
+    "customerEmail": null,
+    "bridgeUserId": null,
+    "bridgeWallet": null,
+    "stripeCustomerId": null,
+    "finturuCacheSnapshot": {
+      "event": {
+        "provider": "internal",
+        "providerEventType": "wallet.transfer",
+        "caseCustomerId": "cust-demo-001",
+        "amountCents": 500000,
+        "currency": "USD",
+        "riskSignals": {
+          "walletAgeDays": 2,
+          "velocity24h": 9
+        },
+        "createdAt": "2026-08-18T00:00:00.000Z",
+        "eventId": "evt-demo-0001",
+        "providerEventId": "prov-evt-0001"
+      },
+      "ruleId": "grafo-v1",
+      "conditionsVersion": 3,
+      "riskScore": 100,
+      "hits": [
+        {
+          "id": "r-high-amount",
+          "name": "High amount",
+          "points": 50,
+          "because": "amountCents >= 300000"
+        },
+        {
+          "id": "r-high-velocity",
+          "name": "High velocity",
+          "points": 40,
+          "because": "velocity24h > 5"
+        },
+        {
+          "id": "r-new-wallet",
+          "name": "New wallet",
+          "points": 15,
+          "because": "walletAgeDays < 7"
+        }
+      ]
+    },
+    "riskScore": 100,
+    "status": "OPEN",
+    "priority": "HIGH",
+    "assignedTo": null,
+    "dueDate": null,
+    "tags": [],
+    "createdAt": "2026-09-08T19:49:06.000Z",
+    "updatedAt": "2026-09-08T19:49:31.000Z",
+    "deletedAt": null,
+    "agentBrief": "WHY THIS CASE WAS OPENED: ZEN opened this case because a wallet.transfer of 500000 USD cents hit three collect rows on the active graph. The dominant signal is r-high-amount (+50): the transfer clears the 300000 cents threshold. That amount alone would not cap the score; combined with velocity and wallet age the fold min([100, sum(hits.points)]) saturates at 100.\n\nSUPPORTING EVIDENCE: r-high-velocity (+40) fired because velocity24h is 9, above the rule cutoff of 5 transfers in 24 hours. r-new-wallet (+15) fired because walletAgeDays is 2, below the 7-day new-wallet window. Provider is internal and the rail is a wallet.transfer, not crypto. Destination country, providerRiskScore, and rail=crypto rows did not fire. No AML alerts are attached to this customer. Related prior cases on the same customer show the same three hits and the same capped score of 100, which is consistent with a repeated high-velocity new-wallet pattern rather than a one-off spike.\n\nANALYST FOCUS: Confirm the wallet is the customer's own and not a pass-through. Check whether the nine transfers in 24 hours are to the same counterparty or many. Verify walletAgeDays against the provider ledger. Do not re-score; the 100 is already capped by ZEN. Next: source-of-funds for the 5000.00 USD equivalent and whether sibling cases should be reviewed together."
+  },
+  "timeline": [
+    {
+      "id": "b0b0b0b0b0b0b0b0b0b00001",
+      "eventType": "CASE_CREATED",
+      "previousValue": null,
+      "newValue": "OPEN",
+      "createdBy": "system:ingest",
+      "createdAt": "2026-09-08T19:49:06.000Z"
+    },
+    {
+      "id": "b0b0b0b0b0b0b0b0b0b00002",
+      "eventType": "AGENT_BRIEFING",
+      "previousValue": null,
+      "newValue": "WHY THIS CASE WAS OPENED: ZEN opened this case because a wallet.transfer of 500000 USD cents hit three collect rows on the active graph. The dominant signal is r-high-amount (+50): the transfer clears the 300000 cents threshold. That amount alone would not cap the score; combined with velocity and wallet age the fold min([100, sum(hits.points)]) saturates at 100.\n\nSUPPORTING EVIDENCE: r-high-velocity (+40) fired because velocity24h is 9, above the rule cutoff of 5 transfers in 24 hours. r-new-wallet (+15) fired because walletAgeDays is 2, below the 7-day new-wallet window. Provider is internal and the rail is a wallet.transfer, not crypto. Destination country, providerRiskScore, and rail=crypto rows did not fire. No AML alerts are attached to this customer. Related prior cases on the same customer show the same three hits and the same capped score of 100, which is consistent with a repeated high-velocity new-wallet pattern rather than a one-off spike.\n\nANALYST FOCUS: Confirm the wallet is the customer's own and not a pass-through. Check whether the nine transfers in 24 hours are to the same counterparty or many. Verify walletAgeDays against the provider ledger. Do not re-score; the 100 is already capped by ZEN. Next: source-of-funds for the 5000.00 USD equivalent and whether sibling cases should be reviewed together.",
+      "createdBy": "system:agent",
+      "createdAt": "2026-09-08T19:49:31.000Z"
+    },
+    {
+      "id": "b0b0b0b0b0b0b0b0b0b00003",
+      "eventType": "SNAPSHOT_REFRESHED",
+      "previousValue": null,
+      "newValue": "{\"event\":{\"provider\":\"internal\",\"providerEventType\":\"wallet.transfer\",\"caseCustomerId\":\"cust-demo-001\",\"amountCents\":500000,\"currency\":\"USD\",\"riskSignals\":{\"walletAgeDays\":2,\"velocity24h\":9},\"createdAt\":\"2026-08-18T00:00:00.000Z\",\"eventId\":\"evt-demo-0001\",\"providerEventId\":\"prov-evt-0001\"},\"ruleId\":\"grafo-v1\",\"conditionsVersion\":3,\"riskScore\":100,\"hits\":[{\"id\":\"r-high-amount\",\"name\":\"High amount\",\"points\":50,\"because\":\"amountCents >= 300000\"},{\"id\":\"r-high-velocity\",\"name\":\"High velocity\",\"points\":40,\"because\":\"velocity24h > 5\"},{\"id\":\"r-new-wallet\",\"name\":\"New wallet\",\"points\":15,\"because\":\"walletAgeDays < 7\"}]}",
+      "createdBy": "system:ingest",
+      "createdAt": "2026-09-08T19:49:06.100Z"
+    }
+  ],
+  "snapshot": {
+    "event": {
+      "provider": "internal",
+      "providerEventType": "wallet.transfer",
+      "caseCustomerId": "cust-demo-001",
+      "amountCents": 500000,
+      "currency": "USD",
+      "riskSignals": {
+        "walletAgeDays": 2,
+        "velocity24h": 9
+      },
+      "createdAt": "2026-08-18T00:00:00.000Z",
+      "eventId": "evt-demo-0001",
+      "providerEventId": "prov-evt-0001"
+    },
+    "ruleId": "grafo-v1",
+    "conditionsVersion": 3,
+    "riskScore": 100,
+    "hits": [
+      {
+        "id": "r-high-amount",
+        "name": "High amount",
+        "points": 50,
+        "because": "amountCents >= 300000"
+      },
+      {
+        "id": "r-high-velocity",
+        "name": "High velocity",
+        "points": 40,
+        "because": "velocity24h > 5"
+      },
+      {
+        "id": "r-new-wallet",
+        "name": "New wallet",
+        "points": 15,
+        "because": "walletAgeDays < 7"
+      }
+    ]
+  },
+  "amlAlerts": [],
+  "relatedCases": [
+    {
+      "id": "a1b2c3d4e5f60718293a0002",
+      "organizationId": "00000000000000000000aaaa",
+      "customerId": "cust-demo-001",
+      "customerEmail": null,
+      "bridgeUserId": null,
+      "bridgeWallet": null,
+      "stripeCustomerId": null,
+      "finturuCacheSnapshot": {
+        "event": {
+          "provider": "internal",
+          "providerEventType": "wallet.transfer",
+          "caseCustomerId": "cust-demo-001",
+          "amountCents": 500000,
+          "currency": "USD",
+          "riskSignals": {
+            "walletAgeDays": 2,
+            "velocity24h": 9
+          },
+          "createdAt": "2026-08-18T00:00:00.000Z",
+          "eventId": "evt-demo-0001",
+          "providerEventId": "prov-evt-0001"
+        },
+        "ruleId": "grafo-v1",
+        "conditionsVersion": 3,
+        "riskScore": 100,
+        "hits": [
+          {
+            "id": "r-high-amount",
+            "name": "High amount",
+            "points": 50,
+            "because": "amountCents >= 300000"
+          },
+          {
+            "id": "r-high-velocity",
+            "name": "High velocity",
+            "points": 40,
+            "because": "velocity24h > 5"
+          },
+          {
+            "id": "r-new-wallet",
+            "name": "New wallet",
+            "points": 15,
+            "because": "walletAgeDays < 7"
+          }
+        ]
+      },
+      "riskScore": 100,
+      "status": "OPEN",
+      "priority": "HIGH",
+      "assignedTo": null,
+      "dueDate": null,
+      "tags": [],
+      "createdAt": "2026-09-07T12:00:00.000Z",
+      "updatedAt": "2026-09-08T19:49:31.000Z",
+      "deletedAt": null,
+      "agentBrief": "WHY THE PRIOR CASE WAS OPENED: ZEN opened this case because a wallet.transfer of 500000 USD cents hit three collect rows on the active graph. The dominant signal is r-high-amount (+50): the transfer clears the 300000 cents threshold. That amount alone would not cap the score; combined with velocity and wallet age the fold min([100, sum(hits.points)]) saturates at 100.\n\nSUPPORTING EVIDENCE: r-high-velocity (+40) fired because velocity24h is 9, above the rule cutoff of 5 transfers in 24 hours. r-new-wallet (+15) fired because walletAgeDays is 2, below the 7-day new-wallet window. Provider is internal and the rail is a wallet.transfer, not crypto. Destination country, providerRiskScore, and rail=crypto rows did not fire. No AML alerts are attached to this customer. Related prior cases on the same customer show the same three hits and the same capped score of 100, which is consistent with a repeated high-velocity new-wallet pattern rather than a one-off spike.\n\nANALYST FOCUS: Confirm the wallet is the customer's own and not a pass-through. Check whether the nine transfers in 24 hours are to"
+    },
+    {
+      "id": "a1b2c3d4e5f60718293a0003",
+      "organizationId": "00000000000000000000aaaa",
+      "customerId": "cust-demo-001",
+      "customerEmail": null,
+      "bridgeUserId": null,
+      "bridgeWallet": null,
+      "stripeCustomerId": null,
+      "finturuCacheSnapshot": {
+        "event": {
+          "provider": "internal",
+          "providerEventType": "wallet.transfer",
+          "caseCustomerId": "cust-demo-001",
+          "amountCents": 500000,
+          "currency": "USD",
+          "riskSignals": {
+            "walletAgeDays": 2,
+            "velocity24h": 9
+          },
+          "createdAt": "2026-08-18T00:00:00.000Z",
+          "eventId": "evt-demo-0001",
+          "providerEventId": "prov-evt-0001"
+        },
+        "ruleId": "grafo-v1",
+        "conditionsVersion": 3,
+        "riskScore": 100,
+        "hits": [
+          {
+            "id": "r-high-amount",
+            "name": "High amount",
+            "points": 50,
+            "because": "amountCents >= 300000"
+          },
+          {
+            "id": "r-high-velocity",
+            "name": "High velocity",
+            "points": 40,
+            "because": "velocity24h > 5"
+          },
+          {
+            "id": "r-new-wallet",
+            "name": "New wallet",
+            "points": 15,
+            "because": "walletAgeDays < 7"
+          }
+        ]
+      },
+      "riskScore": 100,
+      "status": "OPEN",
+      "priority": "HIGH",
+      "assignedTo": null,
+      "dueDate": null,
+      "tags": [],
+      "createdAt": "2026-09-06T08:30:00.000Z",
+      "updatedAt": "2026-09-06T08:30:00.000Z",
+      "deletedAt": null,
+      "agentBrief": null
+    }
+  ],
+  "agentBrief": "WHY THIS CASE WAS OPENED: ZEN opened this case because a wallet.transfer of 500000 USD cents hit three collect rows on the active graph. The dominant signal is r-high-amount (+50): the transfer clears the 300000 cents threshold. That amount alone would not cap the score; combined with velocity and wallet age the fold min([100, sum(hits.points)]) saturates at 100.\n\nSUPPORTING EVIDENCE: r-high-velocity (+40) fired because velocity24h is 9, above the rule cutoff of 5 transfers in 24 hours. r-new-wallet (+15) fired because walletAgeDays is 2, below the 7-day new-wallet window. Provider is internal and the rail is a wallet.transfer, not crypto. Destination country, providerRiskScore, and rail=crypto rows did not fire. No AML alerts are attached to this customer. Related prior cases on the same customer show the same three hits and the same capped score of 100, which is consistent with a repeated high-velocity new-wallet pattern rather than a one-off spike.\n\nANALYST FOCUS: Confirm the wallet is the customer's own and not a pass-through. Check whether the nine transfers in 24 hours are to the same counterparty or many. Verify walletAgeDays against the provider ledger. Do not re-score; the 100 is already capped by ZEN. Next: source-of-funds for the 5000.00 USD equivalent and whether sibling cases should be reviewed together."
+}

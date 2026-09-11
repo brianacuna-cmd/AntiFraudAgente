@@ -5,6 +5,7 @@ get_analysis_pack is read-only; put_agent_brief is the only write tool.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ from fraud_companion.adapters.llm.tools import (
     build_list_cases_tool,
     build_put_agent_brief_tool,
 )
+from fraud_companion.domain.analysis_pack import trim_analysis_pack
 from fraud_companion.domain.brief import BriefValidationError
 from fraud_companion.domain.policy import UNTRUSTED_PACK_CLOSE, UNTRUSTED_PACK_OPEN
 from fraud_companion.domain.tools_spec import ALLOWED_TOOLS, DisallowedToolError
@@ -59,12 +61,40 @@ class TestGetAnalysisPackTool:
         assert result.endswith(UNTRUSTED_PACK_CLOSE)
 
         inner = result[len(UNTRUSTED_PACK_OPEN) : -len(UNTRUSTED_PACK_CLOSE)]
-        assert json.loads(inner) == pack
-        # untouched: no "because" invented, no reshaping, values preserved
+        parsed = json.loads(inner)
+        # New contract: domain trim, then untrusted framing. Business facts stay.
+        assert parsed == trim_analysis_pack(pack)
         assert "matched a known mule account" in inner
         assert "Jane Doe" in inner
         assert "AB123" in inner
         http_client.get.assert_called_once_with("/cases/1/analysis-pack")
+
+    def test_trims_real_pack_before_untrusted_framing(
+        self, http_client: MagicMock
+    ) -> None:
+        fixture = (
+            Path(__file__).resolve().parents[2]
+            / "fixtures"
+            / "anonymized_analysis_pack.json"
+        )
+        pack = json.loads(fixture.read_text(encoding="utf-8"))
+        http_client.get.return_value = pack
+
+        tool = build_get_analysis_pack_tool(http_client)
+        result = tool.invoke({"case_id": pack["case"]["id"]})
+
+        inner = result[len(UNTRUSTED_PACK_OPEN) : -len(UNTRUSTED_PACK_CLOSE)]
+        parsed = json.loads(inner)
+        assert parsed == trim_analysis_pack(pack)
+        assert parsed != pack
+        event = parsed["snapshot"]["event"]
+        assert event["provider"] == "internal"
+        assert event["amountCents"] == 500000
+        assert event["riskSignals"]["walletAgeDays"] == 2
+        assert event["riskSignals"]["velocity24h"] == 9
+        assert all("because" in hit for hit in parsed["snapshot"]["hits"])
+        assert all(set(item) <= {"id", "score", "hits"} for item in parsed["relatedCases"])
+        assert [event["eventType"] for event in parsed["timeline"]] == ["CASE_CREATED"]
 
     def test_404_propagates_case_not_found_error(self, http_client: MagicMock) -> None:
         http_client.get.side_effect = CaseNotFoundError(
